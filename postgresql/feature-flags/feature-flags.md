@@ -1,26 +1,12 @@
 # Feature Flags with LISTEN/NOTIFY
 
-- **writes are rare** — a few a day, from a human.
-- **reads are constant** — thousands a second, and the answer almost never changes. Use an in-memory `map[string]Flag`.
-
-So the read path cannot be a query. A round trip and a pooled connection to
-answer a question whose answer changed twice this week is a way to take your
-own database down with your own configuration. Every instance holds the flag
-table in a `map[string]Flag` and evaluates from memory, which turns a flag
-check into a map lookup.
-
-That is not the interesting part. The interesting part is that instance
-memory is now a **copy**, and the entire rest of this lab is one question:
-when somebody flips a flag, how does an instance find out its copy is wrong,
-and what is it serving until it does?
-
-It matters because a flag is how you turn a broken feature off. A kill switch
-that takes thirty seconds to land is a thirty-second outage you chose.
+- **writes are rare**: a few a day, from a human.
+- **reads are constant**: thousands a second. Use an in-memory `map[string]Flag`.
 
 ## The setup
 
 ```bash
-docker compose up -d
+docker compose up
 psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
 ```
 
@@ -39,34 +25,10 @@ END $$;
 
 ### The payload is a key, not a flag
 
-Sending the whole row is the obvious optimisation — the listener applies it
-straight to its map and never queries at all — and it is the wrong default
-for a reason unrelated to speed: **a payload is a statement about the past.**
+Two options:
 
-Delivery is at-most-once and unordered with respect to everything else the
-listener is doing. By the time a payload is applied, the row it describes may
-have changed twice more, and the listener may already hold a newer version
-from a reconnect snapshot. Applying it then walks the flag _backwards_, to a
-value that was briefly true and is now wrong, and the instance stays there
-until the next change to that key, because nothing will contradict it.
-Guarding with a version check makes that safe without making it useful: the
-correct handling of a stale payload is to discard it, which leaves an
-announcement that carried nothing.
-
-Re-reading has no such state. It converges on the current row however many
-notifications were missed, duplicated or delivered late, because the answer
-comes from the table and not from the message. The notification is reduced to
-what it is actually good for — a fast hint that something changed — and the
-code handling it is the same code that handles a resync in §2.
-
-It also sidesteps a ceiling. `pg_notify` caps the payload at **8000 bytes**
-and raises `22023 payload string too long` above it; because the call sits
-inside the trigger, that error fails the `UPDATE` that fired it. A flag whose
-targeting rules outgrow the cap would stop being _writable_, not merely
-undeliverable. A key is never going to approach 8000 bytes.
-
-The cost is one indexed lookup per flag change per instance, which is the
-`queries` column below.
+- Send the whole row. It's faster, but if we change a key twice it can deliver wrong. Also `pg_notify` caps the payload at **8000 bytes** and raises `22023 payload string too long`.
+- Send just the updated key and then to a `SELECT` to check the updated value.
 
 ### What LISTEN/NOTIFY actually promises
 
