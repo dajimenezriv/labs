@@ -1,7 +1,7 @@
 # Feature Flags with LISTEN/NOTIFY
 
-- **writes are rare**: a few a day, from a human.
-- **reads are constant**: thousands a second. Use an in-memory `map[string]Flag`.
+- **Writes are rare**: a few a day, from a human.
+- **Reads are constant**: thousands a second. Use an in-memory `map[string]Flag`.
 
 ## The setup
 
@@ -34,24 +34,8 @@ Two options:
 
 Two halves, and they pull in opposite directions:
 
-**Transactional.** The notification is queued by the trigger and delivered at
-`COMMIT`. Roll back and nothing is sent, ever. That is atomicity between a
-data change and its announcement, and it is precisely what an outbox table
-exists to fake when the broker lives outside the database — compare
-[kafka/cmd/service/outbox.go](../../../kafka/cmd/service/outbox.go), which is
-a whole table, a poller and a publisher buying this one property.
-
-**Not durable.** At-most-once. No retention, no replay, no offset. A
-notification published while a listener is between connections is not queued
-for it and not redelivered. It is gone, and nothing on either side records
-that it existed.
-
-The instinct to file this under "pub/sub is unreliable" is half right and the
-wrong half is the one that costs you. Redis pub/sub behaves like this. Kafka
-does not: a consumer that dies and comes back resumes from a committed
-offset, so the messages it missed are still there. `LISTEN` has no committed
-position to resume from, and §2 is what that absence looks like from
-production.
+- **Transactional.** The notification is queued by the trigger and delivered at `COMMIT`. Roll back and nothing is sent, ever.
+- **Not durable.** At-most-once. No retention, no replay, no offset.
 
 So NOTIFY is a latency optimisation over polling. It is never the thing that
 makes a listener correct.
