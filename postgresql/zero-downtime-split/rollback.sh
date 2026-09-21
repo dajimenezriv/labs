@@ -30,7 +30,7 @@ p "CREATE SUBSCRIPTION payments_sub
 while [[ "$(sub_state)" != "r" ]]; do :; done
 
 rule "1. out (the same cutover, quietly)"
-do_cutover safe
+do_cutover
 printf '  writes held for        %5s ms\n' "$total"
 printf '  now serving from       the new database\n'
 

@@ -1,14 +1,3 @@
-// The application under migration, and the client that measures it.
-//
-//	go run . serve    the service: one HTTP API, two database pools, a
-//	                  routing switch that moves reads and writes between
-//	                  them while it is running
-//	go run . load     the workload: pays orders continuously, checks that
-//	                  what it wrote it can read back, and records every
-//	                  request outcome
-//
-// The scripts drive the migration; this binary is what "without downtime"
-// is measured against.
 package main
 
 import (

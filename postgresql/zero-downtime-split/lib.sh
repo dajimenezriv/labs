@@ -5,8 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-readonly MONO=postgres://postgres:postgres@localhost:5558/db
-readonly PAY=postgres://postgres:postgres@localhost:5559/db
+readonly MONO=postgres://postgres:postgres@localhost:5555/db
+readonly PAY=postgres://postgres:postgres@localhost:5556/db
 readonly SVC=http://localhost:8088
 readonly BIN=./zero-downtime-split
 
@@ -20,8 +20,8 @@ ms() { date +%s%3N; }
 rule() { printf '\n── %s ───────────────────────────────\n' "$*"; }
 
 require_seed() {
-  m 'SELECT 1 FROM lab.orders LIMIT 1' >/dev/null 2>&1 && return 0
-  echo "no lab.orders: psql $MONO -f seed.sql (the stack must be up)" >&2
+  m 'SELECT 1 FROM lab.payments LIMIT 1' >/dev/null 2>&1 && return 0
+  echo "no lab.payments: psql $MONO -f seed.sql (the stack must be up)" >&2
   exit 1
 }
 
@@ -36,7 +36,7 @@ start_service() {
     curl -fsS "$SVC/stats" >/dev/null 2>&1 && break
     sleep 0.1
   done
-  ctl 'writes=monolith&reads=monolith&halfwrite=0&reset=1'
+  ctl 'writes=monolith&reads=monolith&reset=1'
 }
 
 stop_service() { [[ -n ${SERVICE_PID:-} ]] && kill "$SERVICE_PID" 2>/dev/null; wait 2>/dev/null || true; }
@@ -71,11 +71,8 @@ reset_monolith() {
 # not create anything: the table has to exist on the subscriber with matching
 # column names and types before the subscription can copy a single row.
 #
-# Two things are deliberately absent and one is deliberately present:
+# One thing is deliberately absent and one is deliberately present:
 #
-#   - no REFERENCES lab.orders. The orders table is not in this database and
-#     never will be. The constraint that used to guarantee a payment points
-#     at a real order is gone, and nothing replaces it but the write path.
 #   - no seed data. The COPY brings it.
 #   - the (order_id) index IS here, because indexes are not replicated
 #     either. Without it, every read in the new service is a sequential scan,
@@ -132,40 +129,37 @@ rows_pay()  { p 'SELECT count(*) FROM lab.payments'; }
 # The cutover itself. Five statements, and their order is the whole
 # difference between a held request and an outage. The timings come back in
 # globals so the caller can print them.
-#
-# mode: safe | naive-seq | naive-lag
 do_cutover() {
-  local MODE=$1 t
+  local t
   t0=$(ms)
 
-  if [[ $MODE != naive-lag ]]; then
-    # Held, not rejected, and it does not return until the writes already in
-    # flight have committed. After this line the monolith's payments table is
-    # a fixed target, which is the only condition under which "caught up"
-    # means anything.
-    ctl 'freeze=on'
-    quiesce=$(( $(ms) - t0 ))
+  # Held, not rejected, and it does not return until the writes already in
+  # flight have committed. After this line the monolith's payments table is
+  # a fixed target, which is the only condition under which "caught up"
+  # means anything.
+  #
+  # The freeze covers everything down to the thaw, not just the drain: a
+  # write that landed on the monolith after the subscription was dropped
+  # would be carried by neither direction and orphaned there for good.
+  ctl 'freeze=on'
+  quiesce=$(( $(ms) - t0 ))
 
-    # Drain. The gate is rows, not LSNs -- see below for why.
-    t=$(ms)
-    while (( $(rows_pay) < $(rows_mono) )); do :; done
-    drain=$(( $(ms) - t ))
-    outstanding=$(lag_bytes)
-  else
-    quiesce=0; drain=0; outstanding=$(lag_bytes)
-  fi
+  # Drain. The gate is rows, not LSNs -- see below for why.
+  t=$(ms)
+  while (( $(rows_pay) < $(rows_mono) )); do :; done
+  drain=$(( $(ms) - t ))
+  outstanding=$(lag_bytes)
 
   # The forward subscription goes before the new database starts generating
   # its own ids, or the two streams collide in the same table.
   t=$(ms); p "DROP SUBSCRIPTION payments_sub" >/dev/null; dropsub=$(( $(ms) - t ))
 
   # Logical replication copies rows. It does not copy the sequence that
-  # produced their ids, so the new database's sequence is still at 1 and its
-  # first insert claims a primary key that arrived in the COPY.
+  # produced their ids, so without this the new database's sequence is still
+  # at 1 and its first insert claims a primary key that arrived in the COPY.
+  # After the drain, because the drain is what decides what the highest id is.
   t=$(ms)
-  if [[ $MODE != naive-seq ]]; then
-    p "SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
-  fi
+  p "SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
   seqfix=$(( $(ms) - t ))
 
   # Rollback is a subscription pointing the other way, and it has to be
@@ -180,6 +174,6 @@ do_cutover() {
 
   t=$(ms); ctl 'writes=payments&reads=payments'; flip=$(( $(ms) - t ))
 
-  [[ $MODE != naive-lag ]] && ctl 'freeze=off'
+  ctl 'freeze=off'
   total=$(( $(ms) - t0 ))
 }

@@ -42,18 +42,13 @@ type app struct {
 	reads  string
 	frozen bool
 
-	// Fraction of writes, in percent, that return after the payment is
-	// committed but before the order is updated. Stands in for the process
-	// dying between two commits that used to be one -- see atomicity.sh.
-	halfWrite atomic.Int64
-
-	ok, failed, mismatch, halved atomic.Int64
+	ok, failed, mismatch atomic.Int64
 }
 
 func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	monoDSN := fs.String("monolith", "postgres://postgres:postgres@localhost:5558/db", "monolith database")
-	payDSN := fs.String("payments", "postgres://postgres:postgres@localhost:5559/db", "payments database")
+	monoDSN := fs.String("monolith", "postgres://postgres:postgres@localhost:5555/db", "monolith database")
+	payDSN := fs.String("payments", "postgres://postgres:postgres@localhost:5556/db", "payments database")
 	addr := fs.String("addr", ":8088", "listen address")
 	fs.Parse(args)
 
@@ -99,11 +94,9 @@ func (a *app) route() (writes, reads string) {
 
 // POST /pay?order_id=N&amount=N
 //
-// Paying an order touches two tables: it inserts a payment and marks the
-// order paid. Note what the request carries. While both tables are in one
-// database the amount could be read from lab.orders inside the transaction;
-// once payments moves, that column is in another service's database, so the
-// caller has to send it. The API contract changes before the data does.
+// One row in lab.payments, written to whichever database currently owns the
+// table. The routing switch is the whole of the migration: the same write
+// goes to the monolith before the cutover and to the new database after it.
 func (a *app) handlePay(w http.ResponseWriter, r *http.Request) {
 	orderID, _ := strconv.ParseInt(r.URL.Query().Get("order_id"), 10, 64)
 	amount, _ := strconv.ParseInt(r.URL.Query().Get("amount"), 10, 64)
@@ -117,13 +110,13 @@ func (a *app) handlePay(w http.ResponseWriter, r *http.Request) {
 	a.gate.RLock()
 	defer a.gate.RUnlock()
 
-	writes, _ := a.route()
-	var err error
-	if writes == monolith {
-		err = a.payMonolith(r.Context(), orderID, amount)
-	} else {
-		err = a.paySplit(r.Context(), orderID, amount)
+	pool := a.mono
+	if writes, _ := a.route(); writes != monolith {
+		pool = a.pay
 	}
+	_, err := pool.Exec(r.Context(),
+		`INSERT INTO lab.payments (order_id, amount_cents, provider_ref) VALUES ($1, $2, $3)`,
+		orderID, amount, "svc-"+strconv.FormatInt(orderID, 10))
 	if err != nil {
 		a.failed.Add(1)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -131,49 +124,6 @@ func (a *app) handlePay(w http.ResponseWriter, r *http.Request) {
 	}
 	a.ok.Add(1)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// One database, one transaction. Either both rows change or neither does,
-// and nothing in the application has to think about it.
-func (a *app) payMonolith(ctx context.Context, orderID, amount int64) error {
-	tx, err := a.mono.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	ref := "svc-" + strconv.FormatInt(orderID, 10)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO lab.payments (order_id, amount_cents, provider_ref) VALUES ($1, $2, $3)`,
-		orderID, amount, ref); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE lab.orders SET status = 'paid' WHERE id = $1`, orderID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// Two databases, two commits, and no way to make them one. The payment is
-// the authoritative record so it goes first; the order update is a second
-// call that can fail on its own.
-func (a *app) paySplit(ctx context.Context, orderID, amount int64) error {
-	ref := "svc-" + strconv.FormatInt(orderID, 10)
-	if _, err := a.pay.Exec(ctx,
-		`INSERT INTO lab.payments (order_id, amount_cents, provider_ref) VALUES ($1, $2, $3)`,
-		orderID, amount, ref); err != nil {
-		return err
-	}
-
-	if n := a.halfWrite.Load(); n > 0 && orderID%100 < n {
-		a.halved.Add(1)
-		return nil // as if the process died here
-	}
-
-	_, err := a.mono.Exec(ctx,
-		`UPDATE lab.orders SET status = 'paid' WHERE id = $1`, orderID)
-	return err
 }
 
 // GET /pay?order_id=N -> number of payments recorded for that order.
@@ -214,7 +164,7 @@ func (a *app) handleRead(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, n)
 }
 
-// POST /control?writes=&reads=&freeze=on|off&halfwrite=N
+// POST /control?writes=&reads=&freeze=on|off
 //
 // freeze=on does not return until the write path is quiesced, so the caller
 // knows that when it gets its response, nothing is in flight.
@@ -246,15 +196,10 @@ func (a *app) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Unlock()
 
-	if v := q.Get("halfwrite"); v != "" {
-		n, _ := strconv.ParseInt(v, 10, 64)
-		a.halfWrite.Store(n)
-	}
 	if q.Get("reset") != "" {
 		a.ok.Store(0)
 		a.failed.Store(0)
 		a.mismatch.Store(0)
-		a.halved.Store(0)
 	}
 	a.handleStats(w, r)
 }
@@ -273,7 +218,6 @@ func (a *app) handleStats(w http.ResponseWriter, r *http.Request) {
 		"ok":       a.ok.Load(),
 		"failed":   a.failed.Load(),
 		"mismatch": a.mismatch.Load(),
-		"halved":   a.halved.Load(),
 	})
 }
 

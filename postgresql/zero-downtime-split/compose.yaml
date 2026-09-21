@@ -12,7 +12,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: db
     ports:
-      - "5558:5432"
+      - "5555:5432"
     volumes:
       - monolith-data:/var/lib/postgresql
     healthcheck:
@@ -32,7 +32,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: db
     ports:
-      - "5559:5432"
+      - "5556:5432"
     volumes:
       - payments-data:/var/lib/postgresql
     healthcheck:

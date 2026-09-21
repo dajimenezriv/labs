@@ -72,9 +72,6 @@ rule "3. what did not come across"
 
 printf '  sequence on monolith   %s\n' "$(m "SELECT last_value FROM lab.payments_id_seq")"
 printf '  sequence on new db     %s   <- every insert here collides\n' "$(p "SELECT last_value FROM lab.payments_id_seq")"
-printf '  foreign keys           %s on monolith, %s on new db\n' \
-  "$(m "SELECT count(*) FROM pg_constraint WHERE conrelid='lab.payments'::regclass AND contype='f'")" \
-  "$(p "SELECT count(*) FROM pg_constraint WHERE conrelid='lab.payments'::regclass AND contype='f'")"
 printf '  indexes                %s on monolith, %s on new db (created by hand)\n' \
   "$(m "SELECT count(*) FROM pg_indexes WHERE tablename='payments'")" \
   "$(p "SELECT count(*) FROM pg_indexes WHERE tablename='payments'")"

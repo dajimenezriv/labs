@@ -5,11 +5,7 @@
   - [What does not come across](#what-does-not-come-across)
 - [2. Shadow reads](#2-shadow-reads)
 - [3. The cutover](#3-the-cutover)
-  - [The runbook](#the-runbook)
-  - [Without the sequence](#without-the-sequence)
-  - [Without the freeze](#without-the-freeze)
 - [4. Going back](#4-going-back)
-- [5. What is gone for good](#5-what-is-gone-for-good)
 - [What this costs you](#what-this-costs-you)
 - [Notes](#notes)
 
@@ -42,7 +38,16 @@ SELECT id / 10000 AS bucket,
        md5(string_agg(md5(t::text), '' ORDER BY id))
 FROM lab.payments t
 GROUP BY 1 ORDER BY 1;
+
+--  bucket | count |               md5                
+-- --------+-------+----------------------------------
+--       0 |  9999 | 392a535480609f8b68ddcae276e10155
+--       1 | 10000 | d67cbb6ab646ee7abc1551acbf7c0ea8
+--       2 | 10000 | a0ae72ccbadf892075c9cc1949daacf7
+--     ... |   ... |                              ...
 ```
+
+4. Cutover of writes: achieving zero downtime is almost never worth. Instead we freeze for a few seconds writes on this table.
 
 Moving a table out of a monolith's database is a copy, a flip, and a list of
 things that do not get copied. The copy is the part everyone plans for and
@@ -50,16 +55,13 @@ the only part that takes care of itself.
 
 ```bash
 docker compose up -d
-psql postgres://postgres:postgres@localhost:5558/db -f seed.sql
+psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
 ```
 
 ```bash
-./backfill.sh            # copy a live table into another database
-./cutover.sh             # freeze, drain, flip, thaw -- measured
-./cutover.sh naive-seq   # the same flip, without advancing the sequence
-./cutover.sh naive-lag   # the same flip, without freezing or draining
-./rollback.sh            # and back again
-./atomicity.sh           # what the split costs after it has worked
+./backfill.sh   # copy a live table into another database
+./cutover.sh    # freeze, drain, flip, thaw -- measured
+./rollback.sh   # and back again
 ```
 
 Every script resets the monolith to the seed and tears the replication down
@@ -67,25 +69,18 @@ before it starts, so they can be run in any order and repeated.
 
 ## The setup
 
-The monolith owns two tables joined by a foreign key:
+The monolith owns the table that is leaving:
 
 ```sql
-lab.orders    500 000 rows   id, customer_id, amount_cents, status, created_at
-lab.payments  200 000 rows   id, order_id -> lab.orders(id), amount_cents, ...
+lab.payments  200 000 rows   id, order_id, amount_cents, provider_ref, created_at
 ```
 
-`payments` is what moves. The thing that makes it hard is not the size, it is
-that paying an order touches both tables in one transaction:
-
-```sql
-BEGIN;
-  INSERT INTO lab.payments (order_id, amount_cents, provider_ref) VALUES (...);
-  UPDATE lab.orders SET status = 'paid' WHERE id = $1;
-COMMIT;
-```
-
-The seam runs through a constraint and through a commit, and neither of them
-survives the split. §5 is about what that costs.
+Everything that has to be decoupled in the application first — the joins, the
+foreign key, the transaction that spanned this table and another — is taken
+as already done, by the outbox. A payment is a single-row insert. What is
+left is the part no amount of application work avoids: moving a table that is
+being written to out of one database and into another, without dropping a
+write.
 
 The service (`go run . serve`) is an HTTP API with two connection pools and a
 routing switch that can be moved while it is running, which is the only
@@ -159,7 +154,6 @@ They do not agree, and the disagreement is the useful part:
 ```
   sequence on monolith   204520
   sequence on new db     1   <- every insert here collides
-  foreign keys           1 on monolith, 0 on new db
   indexes                2 on monolith, 2 on new db (created by hand)
   replica identity       d (default: the primary key)
 ```
@@ -168,9 +162,8 @@ Logical replication copies rows. Not tables, not indexes, not constraints,
 not sequences, and no DDL from that point on:
 
 - **The table** has to exist on the subscriber before the subscription can
-  copy a single row, with matching column names and types. It is written by
-  hand, which is where the foreign key quietly disappears — `orders` is not
-  in this database and never will be.
+  copy a single row, with matching column names and types. Nothing creates it
+  for you, and a column type that does not match is found at apply time.
 - **The indexes** are written by hand too. Without the `(order_id)` index
   every read in the new service is a sequential scan, and the number only
   becomes visible when reads cut over.
@@ -190,82 +183,82 @@ Reads keep being served by the monolith. The new database is queried
 alongside, purely so the answers can be compared:
 
 ```
-  writes acknowledged    4014
-  shadow mismatches      0
-  replay lag             00:00:00.000112
+  writes acknowledged    4012
+  shadow mismatches      6
+  replay lag             00:00:00.000183
 ```
 
-Zero, and that is the finding, not a disappointment. It is worth having
-because it is the only way to learn it without learning it in production —
-but it means replication lag is not what makes cutting reads over risky here.
-What makes it risky is everything in the list above that the comparison
+Six, out of four thousand reads, and every one of them a client reading back
+a write from a few hundred microseconds ago. Runs vary between zero and a
+handful. That is the finding, not a disappointment: replication lag is not
+what makes cutting reads over risky here, and the only way to learn that
+without learning it in production is to have measured it.
+
+What does make it risky is everything in the list above that the comparison
 cannot see: an index that was not created, a column type that does not match,
-a constraint that no longer exists. A shadow read compares answers, and two
+a sequence that was never advanced. A shadow read compares answers, and two
 databases can agree on every answer and still not be interchangeable.
 
 ## 3. The cutover
-
-Same rig, same load, three orderings of the same five statements:
-
-| cutover            | writes held | errors | acknowledged and absent | read-after-write misses |
-| ------------------ | ----------: | -----: | ----------------------: | ----------------------: |
-| the runbook        |      530 ms |      0 |                       0 |                       0 |
-| without `setval`   |      458 ms | 22 249 |                       0 |                       0 |
-| without the freeze |        0 ms |      0 |                  **87** |                       1 |
-
-### The runbook
 
 ```bash
 ./cutover.sh
 ```
 
+Five statements, and their order is the whole difference between a held
+request and an outage.
+
 ```
-  quiesce in-flight          9 ms
-  drain to caught up       125 ms
+  quiesce in-flight         20 ms
+  drain to caught up       149 ms
   drop subscription         86 ms
-  advance sequence          52 ms
-  reverse replication      157 ms
-  flip routing              17 ms
+  advance sequence          51 ms
+  reverse replication      159 ms
+  flip routing              15 ms
   ------------------------------
-  writes held for          530 ms
-  WAL still unconfirmed  38752 bytes at the moment rows agreed
+  writes held for          571 ms
+  WAL still unconfirmed   7968 bytes at the moment rows agreed
 ```
 
 ```
 t	ok/s	err/s	rawmiss/s	p99ms
-12	401	0	0	3
-13	399	0	0	3
+12	401	0	0	4
+13	399	0	0	4
 14*	401	0	0	3
-15	206	0	0	526
-16	400	0	0	4
+15	187	0	0	577
+16	399	0	0	6
 
-acknowledged        27804
+acknowledged        27779
 errors              0
 read-after-write    0 misses
-p50 / p99 / max     3 / 4 / 543 ms
+p50 / p99 / max     3 / 4 / 583 ms
+
+  acknowledged writes    27779
+  absent from new db     0
 ```
 
 Half a second of requests taking half a second, and nothing else. No errors,
 no lost writes, no client that failed to read back what it had just written.
 That is what "without downtime" is allowed to mean, and it is a claim about
 the client's timeout, not about the database: the writes were **held, not
-rejected**. A request that waits 530 ms is slow. A request that gets a 503 is
+rejected**. A request that waits 571 ms is slow. A request that gets a 503 is
 downtime. The loader's client timeout is 3 s, and the entire runbook fits
 inside it with room to spare.
 
 The quiesce is one `sync.RWMutex`. Writers hold it for reading for the
 duration of their write; the freeze takes it for writing, which blocks new
-writes _and_ does not return until the in-flight ones have committed. Both
+writes *and* does not return until the in-flight ones have committed. Both
 halves of a quiesce in one primitive, and the second half is the one that
 matters: after `freeze=on` returns, the monolith's `payments` table is a
 fixed target, which is the only condition under which "caught up" means
 anything at all.
 
+
 Then the drain, and the trap that the last line of the output is about. When
-the two row counts agreed there were still **38 KB of WAL unconfirmed** on
+the two row counts agreed there were still **8 KB of WAL unconfirmed** on
 the publisher. The data was all there; the acknowledgement was not, and it
 would not have been for up to ten seconds. Gating the freeze on LSNs turns a
-530 ms cutover into a ten-second one, and the ten seconds are entirely the
+571 ms cutover into a ten-second one, and the ten seconds are entirely the
 feedback interval.
 
 The order of the remaining four is not arbitrary:
@@ -274,79 +267,25 @@ The order of the remaining four is not arbitrary:
    single id of its own, or two writers are inserting into one table.
 2. **`setval` the sequence** — §1's stranded `1`, moved past the highest id
    that arrived, plus a margin. It has to be after the drain, because the
-   drain is what decides what the highest id is.
+   drain is what decides what the highest id is. Skip it and every insert
+   asks for an id, gets 1, 2, 3, and claims a primary key that arrived in the
+   COPY; there are 200 000 collisions to climb through before the first write
+   succeeds.
 3. **Create the reverse subscription** with `copy_data = false`, now, inside
    the freeze. It carries everything written from this moment on and nothing
    before it, so the only way it covers the whole post-cutover window is to
-   exist before the window opens. This is the 157 ms that buys §4.
-4. **Flip the routing**, 17 ms, the only step anyone remembers.
+   exist before the window opens. This is the 159 ms that buys §4.
+4. **Flip the routing**, 15 ms, the only step anyone remembers.
 
-### Without the sequence
-
-```bash
-./cutover.sh naive-seq
-```
-
-Everything else identical; `setval` skipped.
-
-```
-t	ok/s	err/s	rawmiss/s	p99ms
-13*	399	0	0	3
-14	386	0	0	3
-15	0	251	0	461
-16	0	400	0	2
-17	0	400	0	2
-
-acknowledged        5584
-errors              22249
-```
-
-Total outage, from the instant of the flip to the end of the run: every
-insert asks the sequence for an id, gets 1, 2, 3, and every one of them is a
-primary key that arrived in the COPY. It does not degrade and it does not
-recover — it has 200 000 collisions to climb through at 400 a second before
-the first write succeeds.
-
-The reason this is the most common way to lose a Saturday is that nothing
-before the flip is wrong. The copy is complete, the row counts match, the
-shadow reads agree, the lag is microseconds. The sequence is a number in a
-catalog nobody is looking at, and it is fine right up until the moment the
-new database is asked to be a database rather than a copy.
-
-### Without the freeze
-
-```bash
-./cutover.sh naive-lag
-```
-
-`setval` done, nothing held, nothing drained — the flip applied to a moving
-target.
-
-```
-acknowledged        27989
-errors              0
-read-after-write    1 misses
-p50 / p99 / max     3 / 4 / 61 ms
-
-  acknowledged writes    27989
-  absent from new db     87   <- acknowledged and lost
-```
-
-This is the dangerous one. **Zero errors.** No latency spike — the p99 is
-better than the runbook's, because nothing was held. Every dashboard is
-green, the deploy looks like the cleanest of the three, and 87 acknowledged
-payments are not in the database that now owns payments.
-
-They are the writes that were still in the replication stream when the
-subscription was dropped. They committed on the monolith, they were
-acknowledged to the client, and they are still there — the monolith just
-stopped being the place anybody looks. Nothing in the service can detect
-this, because from the service's point of view nothing failed. It surfaces
-weeks later as a customer who was charged and has no payment record.
-
-The single read-after-write miss is the same event caught in the act: one
-client wrote, the flip happened underneath it, and its own write was not in
-the database it was now reading from.
+A last note on what the freeze is worth. It binds writers that go through
+this service, and in the lab that is all of them. In production it is not:
+other replicas need the flag to be shared state rather than a mutex in one
+process, and cron jobs, batch workers and admin sessions do not read the flag
+at all. The backstop belongs in the database — `LOCK TABLE lab.payments IN
+EXCLUSIVE MODE` in a held transaction blocks writers while still allowing
+`SELECT`, and blocks them by making them wait, which is the same hold with
+teeth. Set `lock_timeout` before taking it, or the lock request queues behind
+a long write and everything else queues behind the request.
 
 ## 4. Going back
 
@@ -389,55 +328,6 @@ So the rollback runbook is the cutover runbook, including the `setval`, in
 the other direction. A rollback plan that is not itself a tested runbook is
 two outages, not one.
 
-## 5. What is gone for good
-
-```bash
-./atomicity.sh
-```
-
-The cutover is a day. This is the rest of the time.
-
-```
-  payment for a non-existent order, monolith   HTTP 500
-  the same request, new database               HTTP 204   <- accepted
-```
-
-The foreign key was not weakened, it was deleted, and the write path is the
-only thing left that checks. It is worth being precise about what that means:
-the database no longer has an opinion about whether a payment points at a
-real order, and every future bug in the calling code is now a data integrity
-bug.
-
-The transaction is gone in the same way. Paying an order used to be one
-commit; it is now an insert in one database and an update in another, with a
-gap between them that the process can die in. Three percent of writes do,
-here:
-
-```
-  writes that stopped halfway   240 of 9592
-```
-
-And finding them is the third thing the split took away. The query that would
-have found them is a join, and the join no longer exists:
-
-```
-  payments recorded             17803
-  orders still open             240
-  payments with no order        1
-```
-
-Both numbers come out of a program, not a query — read the ids out of one
-database, stream them into the other, compare there. It found all 240 orders
-that were paid and left open, and the single orphan payment from the top of
-this section. That program is now permanent infrastructure: it needs a
-watermark, a schedule, an alert, and somewhere to put what it finds, and it
-is the piece that is invariably missing when the split is declared done.
-
-What actually fixes the 240 is not a better reconciler. It is making the
-second write derivable from the first — a transactional outbox in the
-payments database, drained by a relay that retries until the order update
-sticks. The reconciler stays anyway, to catch the days the relay is wrong.
-
 ## What this costs you
 
 - **The migration starts with a restart.** `wal_level = logical` is not the
@@ -449,11 +339,13 @@ sticks. The reconciler stays anyway, to catch the days the relay is wrong.
   nothing lost. Every hour spent worrying about the copy is an hour not spent
   on the list of things it does not copy.
 - **The sequence is the outage.** It is the one item on that list that fails
-  100% of writes, immediately, and it is invisible in every check performed
-  before the flip. It also fails in both directions: forward at the cutover,
-  backward at the rollback.
+  every write, immediately, and it is invisible in every check performed
+  before the flip: the copy is complete, the row counts match, the shadow
+  reads agree, the lag is microseconds. It also fails in both directions —
+  forward at the cutover, backward at the rollback, where §4 measures the gap
+  at 9 060.
 - **Held is not rejected, and the client's timeout is the spec.** "Zero
-  downtime" here means 530 ms of elevated latency inside a 3 s timeout. Pin
+  downtime" here means 571 ms of elevated latency inside a 3 s timeout. Pin
   the budget to the tightest caller timeout you have, then make the runbook
   fit inside it, and if it does not fit, the cutover needs to be shorter
   rather than the claim looser.
@@ -461,19 +353,15 @@ sticks. The reconciler stays anyway, to catch the days the relay is wrong.
   driven and trails by up to `wal_receiver_status_interval`. It is the right
   metric for "is the publisher's disk safe" and the wrong one for "may I
   flip".
-- **The cutover that looks cleanest is the one that lost data.** Skipping the
-  freeze produced no errors, no latency spike, and 87 acknowledged writes
-  that are not in the new database. If the only evidence the migration is
-  going well is that nothing went red, there is no evidence.
+- **Count the writes, do not watch the dashboard.** A flip applied to a
+  moving target loses acknowledged writes without producing a single error or
+  a latency spike, because from the service's point of view nothing failed.
+  The check that catches it is the one §3 ends on: every id that got a 2xx,
+  looked up in the database that now owns it.
 - **Reversibility is a decision made before the flip, not after.** The
-  reverse subscription costs 157 ms inside the freeze and cannot be created
+  reverse subscription costs 159 ms inside the freeze and cannot be created
   retroactively, because `copy_data = false` means it only carries what comes
   after it.
-- **The split is permanent and the guarantees do not come back.** One
-  constraint and one transaction, traded for a reconciler you have to write,
-  run and watch forever. That trade may well be worth it — but it is the
-  actual price of the microservice, and it is paid every day after the day
-  everyone remembers.
 
 ## Notes
 
@@ -496,5 +384,5 @@ sticks. The reconciler stays anyway, to catch the days the relay is wrong.
   have to exist at once, `CREATE SUBSCRIPTION ... WITH (origin = none)` is
   what stops a row applied from a subscription being published back.
 - The per-step timings are measured around `psql` invocations from bash, so
-  each carries about 20-30 ms of process startup. The 530 ms is an honest
+  each carries about 20-30 ms of process startup. The 571 ms is an honest
   upper bound on the real cutover, not a floor.
