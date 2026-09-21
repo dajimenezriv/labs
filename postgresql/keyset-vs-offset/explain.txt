@@ -1,0 +1,142 @@
+== offset depth 0
+Limit  (cost=0.43..1.57 rows=20 width=61) (actual time=0.025..0.107 rows=20.00 loops=1)
+  Buffers: shared hit=5
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..283411.10 rows=4999936 width=61) (actual time=0.022..0.050 rows=20.00 loops=1)
+        Index Searches: 1
+        Buffers: shared hit=5
+Planning:
+  Buffers: shared hit=107
+Planning Time: 0.697 ms
+Execution Time: 0.166 ms
+
+== keyset depth 0
+Limit  (cost=0.43..1.62 rows=20 width=61) (actual time=0.018..0.097 rows=20.00 loops=1)
+  Buffers: shared hit=5
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..295909.45 rows=4999851 width=61) (actual time=0.015..0.044 rows=20.00 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-01-02 03:46:40+00'::timestamp with time zone, '5000000'::bigint))
+        Index Searches: 1
+        Buffers: shared hit=5
+Planning:
+  Buffers: shared hit=110
+Planning Time: 0.739 ms
+Execution Time: 0.185 ms
+
+== offset depth 1000
+Limit  (cost=57.12..58.25 rows=20 width=61) (actual time=2.734..2.808 rows=20.00 loops=1)
+  Buffers: shared hit=19
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..283411.10 rows=4999936 width=61) (actual time=0.023..1.439 rows=1020.00 loops=1)
+        Index Searches: 1
+        Buffers: shared hit=19
+Planning:
+  Buffers: shared hit=107
+Planning Time: 0.723 ms
+Execution Time: 2.857 ms
+
+== keyset depth 1000
+Limit  (cost=0.43..1.62 rows=20 width=61) (actual time=0.054..0.150 rows=20.00 loops=1)
+  Buffers: shared hit=4
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..295864.42 rows=4998642 width=61) (actual time=0.050..0.085 rows=20.00 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-01-02 03:46:20+00'::timestamp with time zone, '4999000'::bigint))
+        Index Searches: 1
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=110
+Planning Time: 1.620 ms
+Execution Time: 0.315 ms
+
+== offset depth 10000
+Limit  (cost=567.26..568.39 rows=20 width=61) (actual time=25.781..25.858 rows=20.00 loops=1)
+  Buffers: shared hit=156
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..283411.10 rows=4999936 width=61) (actual time=0.023..13.356 rows=10020.00 loops=1)
+        Index Searches: 1
+        Buffers: shared hit=156
+Planning:
+  Buffers: shared hit=107
+Planning Time: 0.710 ms
+Execution Time: 25.915 ms
+
+== keyset depth 10000
+Limit  (cost=0.43..1.62 rows=20 width=61) (actual time=0.064..0.188 rows=20.00 loops=1)
+  Buffers: shared hit=4
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..295436.27 rows=4987762 width=61) (actual time=0.059..0.101 rows=20.00 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-01-02 03:43:20+00'::timestamp with time zone, '4990000'::bigint))
+        Index Searches: 1
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=110
+Planning Time: 2.144 ms
+Execution Time: 0.447 ms
+
+== offset depth 100000
+Limit  (cost=5668.72..5669.85 rows=20 width=61) (actual time=264.444..264.533 rows=20.00 loops=1)
+  Buffers: shared hit=1524
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..283411.10 rows=4999936 width=61) (actual time=0.057..137.053 rows=100020.00 loops=1)
+        Index Searches: 1
+        Buffers: shared hit=1524
+Planning:
+  Buffers: shared hit=107
+Planning Time: 2.028 ms
+Execution Time: 264.621 ms
+
+== keyset depth 100000
+Limit  (cost=0.43..1.63 rows=20 width=61) (actual time=0.091..0.171 rows=20.00 loops=1)
+  Buffers: shared hit=3 read=1
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..291451.50 rows=4886429 width=61) (actual time=0.087..0.111 rows=20.00 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-01-02 03:13:20+00'::timestamp with time zone, '4900000'::bigint))
+        Index Searches: 1
+        Buffers: shared hit=3 read=1
+Planning:
+  Buffers: shared hit=106
+Planning Time: 0.727 ms
+Execution Time: 0.270 ms
+
+== offset depth 1000000
+Limit  (cost=56683.29..56684.42 rows=20 width=61) (actual time=2635.046..2635.122 rows=20.00 loops=1)
+  Buffers: shared hit=15199
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..283411.10 rows=4999936 width=61) (actual time=0.042..1354.968 rows=1000020.00 loops=1)
+        Index Searches: 1
+        Buffers: shared hit=15199
+Planning:
+  Buffers: shared hit=107
+Planning Time: 2.062 ms
+Execution Time: 2635.214 ms
+
+== keyset depth 1000000
+Limit  (cost=0.43..1.72 rows=20 width=61) (actual time=0.154..0.277 rows=20.00 loops=1)
+  Buffers: shared hit=3 read=1
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..256047.20 rows=3985383 width=61) (actual time=0.149..0.190 rows=20.00 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-01-01 22:13:20+00'::timestamp with time zone, '4000000'::bigint))
+        Index Searches: 1
+        Buffers: shared hit=3 read=1
+Planning:
+  Buffers: shared hit=106
+Planning Time: 2.042 ms
+Execution Time: 0.540 ms
+
+== offset depth 4000000
+Limit  (cost=226731.87..226733.00 rows=20 width=61) (actual time=10657.557..10657.635 rows=20.00 loops=1)
+  Buffers: shared read=60784
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..283411.10 rows=4999936 width=61) (actual time=0.070..5576.399 rows=4000020.00 loops=1)
+        Index Searches: 1
+        Buffers: shared read=60784
+Planning:
+  Buffers: shared hit=83 read=24
+Planning Time: 0.862 ms
+JIT:
+  Functions: 2
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 0.075 ms (Deform 0.000 ms), Inlining 0.000 ms, Optimization 0.197 ms, Emission 1.976 ms, Total 2.248 ms
+Execution Time: 10672.564 ms
+
+== keyset depth 4000000
+Limit  (cost=0.43..3.22 rows=20 width=61) (actual time=0.062..0.155 rows=20.00 loops=1)
+  Buffers: shared hit=2 read=2
+  ->  Index Scan using events_created_at_id_desc on events  (cost=0.43..138494.18 rows=993907 width=61) (actual time=0.058..0.090 rows=20.00 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-01-01 05:33:20+00'::timestamp with time zone, '1000000'::bigint))
+        Index Searches: 1
+        Buffers: shared hit=2 read=2
+Planning:
+  Buffers: shared hit=95 read=11
+Planning Time: 1.941 ms
+Execution Time: 0.365 ms
+

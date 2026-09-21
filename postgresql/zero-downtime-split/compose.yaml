@@ -1,0 +1,46 @@
+name: zero-downtime-split
+
+services:
+  monolith:
+    image: postgres:18-alpine
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: db
+    ports:
+      - "5558:5432"
+    volumes:
+      - monolith-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d db"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  payments:
+    image: postgres:18-alpine
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: db
+    ports:
+      - "5559:5432"
+    volumes:
+      - payments-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d db"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  monolith-data:
+  payments-data:

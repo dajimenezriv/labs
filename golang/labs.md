@@ -1,0 +1,8 @@
+1. Goroutine leak & graceful shutdown lab
+Build an HTTP service with a worker pool and background fan-out, then deliberately leak goroutines: unbuffered channels with no receiver, missing context propagation, workers that outlive the request, a Shutdown that drops in-flight work. Diagnose it with pprof goroutine dumps and fix it with proper context cancellation, errgroup, and a clean shutdown path. This covers the single most common senior Go topic — you'll get asked about context propagation and goroutine lifecycle in almost every loop.
+
+2. Cascading failure lab (timeouts, retries, pool exhaustion)
+A service calling a slow dependency plus a Postgres database. Load-test it until the database/sql pool and upstream client saturate, and watch p99 latency collapse and retries amplify the outage. Then add per-call timeouts, bounded concurrency, backpressure, jittered retries, and a circuit breaker, measuring each change. This is where the design-and-debug portion of the interview lives, and it gives you concrete war stories about http.Client defaults, pool sizing, and retry storms.
+
+3. Profiling & race-hunting lab
+Write an allocation-heavy, lock-contended service (shared map behind a mutex, string concatenation in hot paths, unnecessary escapes) and make it fast using pprof CPU/heap profiles, the execution tracer, and -race. Include at least one real data race and one benign-looking bug the race detector catches. Senior candidates get separated from mid-level here — being able to say "I ran a heap profile and saw X escaping" is worth more than reciting GC theory.

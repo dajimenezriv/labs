@@ -1,0 +1,32 @@
+name: bloat-and-vacuum
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    # Defaults everywhere except logging: this lab is about what stock
+    # autovacuum does, so changing its knobs up front would answer the
+    # question before it is asked.
+    #
+    # log_autovacuum_min_duration=0 logs every autovacuum run with its
+    # tuple counts. Without it autovacuum is invisible -- it either kept up
+    # or it did not, and you cannot tell which from the table alone.
+    command:
+      - postgres
+      - -c
+      - log_autovacuum_min_duration=0
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: db
+    ports:
+      - "5555:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d db"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  postgres-data:

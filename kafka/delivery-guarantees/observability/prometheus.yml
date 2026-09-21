@@ -1,0 +1,15 @@
+global:
+  # Everything this lab does is over in seconds: an ISR shrinks for four
+  # seconds, a rebalance takes eight. The usual 15s would render those as one
+  # sample or none, which is its own lesson (see the writeup) but a bad default
+  # for watching them happen.
+  scrape_interval: 1s
+  evaluation_interval: 1s
+
+scrape_configs:
+  # One target, listed rather than discovered. The main kurita stack discovers
+  # via the docker socket because services come and go there; here the set of
+  # things worth scraping is exactly one and will stay that way.
+  - job_name: kafka
+    static_configs:
+      - targets: ["exporter:9200"]

@@ -1,0 +1,84 @@
+name: backup-and-restore
+
+services:
+  # /backups and /archive do not exist in the image, so Docker creates them
+  # root-owned. Postgres runs as uid 70 and archive_command runs as postgres,
+  # so without this the primary starts fine and every archive attempt fails.
+  init:
+    image: postgres:18-alpine
+    user: root
+    command: chown -R 70:70 /backups /archive
+    volumes:
+      - backups:/backups
+      - archive:/archive
+
+  postgres:
+    image: postgres:18-alpine
+    # wal_level=replica is the default and is already enough for PITR.
+    # archive_mode is NOT: it ships off by default, which is the finding in
+    # part 1 -- stock Postgres keeps no WAL history at all, so the best
+    # recovery a default install can offer is "whatever your last dump said".
+    #
+    # The archive_command is the one from the manual. The `test ! -f` guard is
+    # load-bearing: archiving must never overwrite an existing segment, or a
+    # retried archive after a crash can replace a good segment with a
+    # different one carrying the same name.
+    #
+    # archive_timeout stays at its default of 0 (off) on purpose. That is what
+    # gives the unarchived tail measured in part 2.
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /archive/%f && cp %p /archive/%f
+      - -c
+      - log_checkpoints=on
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: db
+    ports:
+      - "5556:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - backups:/backups
+      - archive:/archive
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d db"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # Somewhere to restore into. Same image, no server running -- the scripts
+  # start one by hand with pg_ctl, which is what a restore actually is.
+  #
+  # It does NOT mount postgres-data. The whole point of part 2 is that the
+  # primary's volume is gone; a restore that reads anything from it proves
+  # nothing. It mounts only the two things a real recovery host would have:
+  # the base backup and the WAL archive.
+  restore:
+    image: postgres:18-alpine
+    user: postgres
+    entrypoint: ["sleep", "infinity"]
+    ports:
+      - "5557:5432"
+    volumes:
+      - restore-data:/var/lib/postgresql
+      - backups:/backups
+      - archive:/archive
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  restore-data:
+  # Deliberately separate volumes. In production the archive is the one thing
+  # that must not share a failure domain with the data directory -- it is
+  # object storage, not another mount on the same host.
+  backups:
+  archive:
