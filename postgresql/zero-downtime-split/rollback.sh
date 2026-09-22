@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
-#
-# Going back.
-#
-# The cutover is reversible for exactly as long as the reverse subscription
-# has been running, which is why cutover.sh creates it inside the freeze
-# rather than leaving it for the day it is needed. This script cuts over,
-# runs on the new database for a while, and then goes back -- and finds the
-# same sequence problem waiting in the other direction.
+
 source "$(dirname "$0")/lib.sh"
 
 mkdir -p out
-require_seed
+
+psql $MONO -f seed.sql
+
 teardown_replication
-reset_monolith
 create_new_schema
 
 trap stop_service EXIT
