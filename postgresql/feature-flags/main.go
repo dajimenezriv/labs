@@ -34,7 +34,7 @@ func main() {
 	interval := flag.Duration("interval", 5*time.Second, "poll interval (-mode poll)")
 	idle := flag.Bool("idle", false, "issue no flag changes; measures the standing cost of the mechanism")
 	kill := flag.Duration("kill", 0, "terminate every listening backend this often; 0 never")
-	settle := flag.Duration("settle", 0, "wait this long after the last change before the final staleness count")
+	settle := flag.Duration("settle", time.Second, "wait this long after the last change before the final staleness count")
 	header := flag.Bool("header", false, "print the column header and exit")
 	flag.Parse()
 
@@ -44,15 +44,12 @@ func main() {
 	}
 
 	if *header {
-		fmt.Println("mode\t| every\t| p50ms\t| p99ms\t| maxms\t| missed\t| queries\t| notifs\t| backends\t| drops\t| stale\t| stale+settle")
+		fmt.Println("mode\t| every\t| p50ms\t| p99ms\t| maxms\t| missed\t| queries\t| notifs\t| backends\t| drops\t| stale")
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// The shared pool every instance would already have for its own queries.
-	// Polling rides on it and needs no connection of its own, which is the
-	// whole difference from LISTEN.
 	cfg := mustReturn(pgxpool.ParseConfig(dsn))
 	cfg.MaxConns = 8
 	cfg.ConnConfig.RuntimeParams["application_name"] = "flag-pool"
@@ -111,18 +108,8 @@ func main() {
 		}
 	}
 
-	// A grace period long enough for a delivered notification to be applied
-	// (p50 is ~9ms) and shorter than any poll interval, so the "stale"
-	// column is what push delivery alone achieved. -settle then counts
-	// again much later, which is what separates "behind" from "never".
-	time.Sleep(time.Second)
+	time.Sleep(*settle)
 	stale := staleInstances(ctx, caches, pool)
-
-	staleAfter := "-"
-	if *settle > 0 {
-		time.Sleep(*settle)
-		staleAfter = fmt.Sprint(staleInstances(ctx, caches, pool))
-	}
 
 	cancel()
 	wg.Wait()
@@ -158,9 +145,9 @@ func main() {
 		every = interval.String()
 	}
 
-	fmt.Printf("%s\t| %s\t| %.1f\t| %.1f\t| %.1f\t| %d\t| %d\t| %d\t| %d\t| %d\t| %d\t| %s\n",
+	fmt.Printf("%s\t| %s\t| %.1f\t| %.1f\t| %.1f\t| %d\t| %d\t| %d\t| %d\t| %d\t| %d\n",
 		label, every, pct(lats, 0.50), pct(lats, 0.99), pct(lats, 1.0),
-		missed, queries, notifs, peak.Load(), drops, stale, staleAfter)
+		missed, queries, notifs, peak.Load(), drops, stale)
 }
 
 // Instances serving at least one flag older than what is committed. Counted
