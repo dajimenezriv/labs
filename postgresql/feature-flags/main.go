@@ -15,6 +15,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Fixed dimensions of the experiment: every script runs the same shape, so
+// these are constants rather than flags nobody ever varies.
+const (
+	dsn       = "postgres://postgres:postgres@localhost:5555/db"
+	instances = 20
+	watchdog  = 10 * time.Second
+	gap       = time.Second
+)
+
 type flip struct {
 	key       string
 	updatedAt time.Time
@@ -22,13 +31,9 @@ type flip struct {
 }
 
 func main() {
-	dsn := flag.String("dsn", "postgres://postgres:postgres@localhost:5555/db", "connection string")
 	mode := flag.String("mode", "listen", "poll | listen | resync")
-	instances := flag.Int("instances", 20, "service instances, each with its own cache")
 	interval := flag.Duration("interval", 5*time.Second, "poll interval (-mode poll)")
-	watchdog := flag.Duration("watchdog", 10*time.Second, "resync watchdog interval (-mode resync)")
 	flips := flag.Int("flips", 20, "flag changes to issue")
-	gap := flag.Duration("gap", 250*time.Millisecond, "time between flag changes")
 	kill := flag.Duration("kill", 0, "terminate every listening backend this often; 0 never")
 	settle := flag.Duration("settle", 0, "wait this long after the last change before the final staleness count")
 	header := flag.Bool("header", false, "print the column header and exit")
@@ -44,7 +49,7 @@ func main() {
 	// The shared pool every instance would already have for its own queries.
 	// Polling rides on it, and so does the watchdog -- neither needs a
 	// connection of its own, which is the whole difference from LISTEN.
-	cfg := must(pgxpool.ParseConfig(*dsn))
+	cfg := must(pgxpool.ParseConfig(dsn))
 	cfg.MaxConns = 8
 	cfg.ConnConfig.RuntimeParams["application_name"] = "flag-pool"
 	pool := must(pgxpool.NewWithConfig(ctx, cfg))
@@ -52,13 +57,13 @@ func main() {
 
 	// Tagged so -kill can find exactly these sessions and nothing else.
 	sep := "?"
-	if strings.Contains(*dsn, "?") {
+	if strings.Contains(dsn, "?") {
 		sep = "&"
 	}
-	listenConnDSN := *dsn + sep + "application_name=flag-listener"
+	listenConnDSN := dsn + sep + "application_name=flag-listener"
 	must(pgx.ParseConfig(listenConnDSN))
 
-	caches := make([]*Cache, *instances)
+	caches := make([]*Cache, instances)
 	var wg sync.WaitGroup
 	for i := range caches {
 		c := newCache()
@@ -69,7 +74,7 @@ func main() {
 		case "listen":
 			wg.Go(func() { c.listen(ctx, listenConnDSN, pool, false, 0) })
 		case "resync":
-			wg.Go(func() { c.listen(ctx, listenConnDSN, pool, true, *watchdog) })
+			wg.Go(func() { c.listen(ctx, listenConnDSN, pool, true, watchdog) })
 		default:
 			fmt.Fprintf(os.Stderr, "unknown -mode %q\n", *mode)
 			os.Exit(2)
@@ -107,7 +112,7 @@ func main() {
 		}
 		issued = append(issued, flip{k, v, at})
 		if i < *flips-1 {
-			time.Sleep(*gap)
+			time.Sleep(gap)
 		}
 	}
 

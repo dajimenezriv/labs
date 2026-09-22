@@ -4,22 +4,20 @@ source "$(dirname "$0")/lib.sh"
 
 psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
 
-readonly N=20
-
-rule "1. propagation to $N instances, 30 changes 1s apart"
+rule "1. propagation to 20 instances, 30 changes 1s apart"
 # The poll intervals are the ones people actually pick. resync is listen plus
 # a watchdog; on this path it should be indistinguishable from listen, and
 # that is the result being established -- §2 is where they diverge.
 {
   go run . -header
   for i in 15s 5s 1s; do
-    go run . -mode poll -interval "$i" -instances $N -flips 30 -gap 1s
+    go run . -mode poll -interval "$i" -flips 30
   done
-  go run . -mode listen -instances $N -flips 30 -gap 1s
-  go run . -mode resync -watchdog 10s -instances $N -flips 30 -gap 1s
+  go run . -mode listen -flips 30
+  go run . -mode resync -flips 30
 } | column -t -s $'\t'
 
-rule "2. cost at rest: $N instances, 30s, no flag changes"
+rule "2. cost at rest: 20 instances, 30s, no flag changes"
 # Nothing to propagate. Everything counted here is what the mechanism spends
 # to learn that nothing happened, which is the state a flag table is in
 # essentially all of the time.
@@ -28,7 +26,7 @@ rule "2. cost at rest: $N instances, 30s, no flag changes"
   printf 'baseline (stack idle)\t| -\t| -\t| %s\n' "$(backends)"
   idle() {
     local mode=$1 every=$2 label=$3 out; out=$(mktemp)
-    go run . -mode "$mode" $every -instances $N -flips 0 -settle 30s >"$out" &
+    go run . -mode "$mode" $every -flips 0 -settle 30s >"$out" &
     local pid=$!
     sleep 15
     local bk; bk=$(backends)
@@ -40,5 +38,5 @@ rule "2. cost at rest: $N instances, 30s, no flag changes"
   idle poll   "-interval 1s"   1s
   idle poll   "-interval 5s"   5s
   idle listen ""               -
-  idle resync "-watchdog 10s"  10s
+  idle resync ""            10s
 } | column -t -s $'\t'

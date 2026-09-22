@@ -3,15 +3,14 @@
 # strategy does about the ones that end without telling anybody.
 
 source "$(dirname "$0")/lib.sh"
-build
 
-readonly N=20
+psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
 
 rule "1. control: no interference, 30 changes 1s apart"
 {
-  "$BIN" -header
-  "$BIN" -mode listen -instances $N -flips 30 -gap 1s -settle 25s
-  "$BIN" -mode resync -watchdog 10s -instances $N -flips 30 -gap 1s -settle 25s
+  go run . -header
+  go run . -mode listen -flips 30 -settle 25s
+  go run . -mode resync -flips 30 -settle 25s
 } | column -t -s $'\t'
 
 rule "2. every listening backend terminated every 5s"
@@ -23,8 +22,8 @@ rule "2. every listening backend terminated every 5s"
 # poll is in the table because it has no session to lose. That is not a
 # tuning difference, it is the entire structural argument for polling.
 {
-  "$BIN" -header
-  "$BIN" -mode listen -instances $N -flips 30 -gap 1s -kill 5s -settle 25s
-  "$BIN" -mode resync -watchdog 10s -instances $N -flips 30 -gap 1s -kill 5s -settle 25s
-  "$BIN" -mode poll -interval 5s -instances $N -flips 30 -gap 1s -kill 5s -settle 25s
+  go run . -header
+  go run . -mode listen -flips 30 -kill 5s -settle 25s
+  go run . -mode resync -flips 30 -kill 5s -settle 25s
+  go run . -mode poll -interval 5s -flips 30 -kill 5s -settle 25s
 } | column -t -s $'\t'
