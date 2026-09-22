@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
-# The listening session is a session, and sessions end. This is what each
-# strategy does about the ones that end without telling anybody.
 
 source "$(dirname "$0")/lib.sh"
 
 psql $DSN -f seed.sql
 
-rule "1. control: no interference, 30 changes 1s apart"
-{
-  go run . -header
-  go run . -mode listen -settle 25s
-} | column -t -s $'\t'
-
-rule "2. every listening backend terminated every 5s"
+rule "every listening backend terminated every 5s"
 # pg_terminate_backend is the honest stand-in: a failover, a restarted
 # pooler, a network blip, a firewall reaping an idle connection. From the
 # client it is the same event -- the session is gone and nothing else is

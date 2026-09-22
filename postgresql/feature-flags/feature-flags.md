@@ -1,43 +1,37 @@
 # Feature Flags with LISTEN/NOTIFY
 
+```bash
+docker compose up
+```
+
+```sql
+CREATE TABLE lab.flags (
+  key text PRIMARY KEY,
+  enabled boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+```
+
 - **Writes are rare**: a few a day, from a human.
 - **Reads are constant**: thousands a second. Use an in-memory `map[string]Flag`.
 
-## The setup
-
-```bash
-docker compose up
-psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
-```
-
-### The payload is a key, not a flag
-
-Two options:
-
-- Send the whole row. It's faster, but if we change a key twice it can deliver wrong. Also `pg_notify` caps the payload at **8000 bytes** and raises `22023 payload string too long`.
-- Send just the updated key and then to a `SELECT` to check the updated value.
-
-### What LISTEN/NOTIFY actually promises
-
-Two halves, and they pull in opposite directions:
+`LISTEN/NOTIFY`:
 
 - **Transactional.** The notification is queued by the trigger and delivered at `COMMIT`. Roll back and nothing is sent, ever.
 - **Not durable.** At-most-once. No retention, no replay, no offset.
 
-So NOTIFY is a latency optimisation over polling. It is never the thing that
-makes a listener correct.
+So `NOTIFY` is a latency optimisation over polling, but since is at-most-once we can miss updates. We need polling + listening.
+
+What to send in `NOTIFY`? Two options:
+
+- Send the whole row. It's faster, but if we change a key twice it can deliver wrong. Also `pg_notify` caps the payload at **8000 bytes** and raises `22023 payload string too long`.
+- Send just the updated key and then to a `SELECT` to check the updated value.
 
 ## 1. Propagation: polling versus listening
 
 ```bash
 ./propagate.sh
 ```
-
-20 instances. Each mode gets two rows: `flipping` is 30 flag changes a
-second apart, `idle` is 30 seconds with nothing changing at all. `p50/p99` are
-wall-clock from issuing the `UPDATE` to the flag being live in an instance's
-map; `queries`, `notifs` and `backends` cover all 20 instances, and
-`backends` is the peak sampled across the run.
 
 | mode        | every |  p50ms |  p99ms | queries | notifs | backends |
 | ----------- | ----: | -----: | -----: | ------: | -----: | -------: |
@@ -46,6 +40,7 @@ map; `queries`, `notifs` and `backends` cover all 20 instances, and
 | listen      |     - |    8.5 |   11.4 |     620 |    600 |       21 |
 | listen idle |     - |      - |      - |      20 |      0 |       22 |
 
+- 20 instances.
 - Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 - Polling costs the same whether or not anything happens. Number of backends is `pool.MaxConns`.
 - Listening costs nothing at rest and scales with changes. Each listening session is a connection, because `LISTEN` cannot come from a pool.
