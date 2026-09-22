@@ -1,26 +1,17 @@
 #!/usr/bin/env bash
-#
-# Copy a live table into another database while it is being written to, and
-# find out what the copy does not bring with it.
-#
-# The copy is the part everyone worries about and it is the part that takes
-# care of itself. CREATE SUBSCRIPTION does an initial COPY and then follows
-# the publisher, both without blocking a single write on the monolith. What
-# it does not do is anything else: no table, no index, no constraint, no
-# sequence position, no DDL from that point on. Every one of those is a
-# manual step, and the sequence is the one that takes the service down at
-# cutover if you miss it.
+
 source "$(dirname "$0")/lib.sh"
 
 mkdir -p out
-require_seed
+
+psql $MONO -f seed.sql
+
 teardown_replication
-reset_monolith
 create_new_schema
 
 trap stop_service EXIT
 start_service
-"$BIN" load -duration 75s -acked out/backfill-acked.txt >out/backfill-load.tsv 2>&1 &
+go run . load -duration 20s -acked out/backfill-acked.txt >out/backfill-load.tsv 2>&1 &
 LOAD=$!
 sleep 4
 
@@ -29,15 +20,7 @@ rule "1. the copy, while the table is being written to"
 before_mono=$(rows_mono)
 t0=$(ms)
 
-# The publication is the publisher-side declaration of what is exported. It
-# takes no lock worth the name and costs nothing until something subscribes.
 m "CREATE PUBLICATION payments_pub FOR TABLE lab.payments" >/dev/null
-
-# The subscription is where the work happens: it opens a replication slot on
-# the publisher, COPYs the table as of the slot's snapshot, and then applies
-# everything the slot has been holding since. The COPY and the stream cannot
-# miss each other -- that handoff is the reason to use this rather than a
-# pg_dump and a prayer.
 p "CREATE SUBSCRIPTION payments_sub
    CONNECTION 'host=monolith port=5432 user=postgres password=postgres dbname=db'
    PUBLICATION payments_pub" >/dev/null

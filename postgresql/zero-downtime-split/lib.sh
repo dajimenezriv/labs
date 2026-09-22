@@ -29,8 +29,7 @@ require_seed() {
 # Its routing always starts where the migration starts: everything on the
 # monolith.
 start_service() {
-  go build -o "$BIN" .
-  "$BIN" serve >out/serve.log 2>&1 &
+  go run . serve >out/serve.log 2>&1 &
   SERVICE_PID=$!
   for _ in $(seq 50); do
     curl -fsS "$SVC/stats" >/dev/null 2>&1 && break
