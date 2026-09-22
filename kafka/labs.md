@@ -13,3 +13,6 @@ Send 80% of traffic under one key. Watch lag climb on exactly one partition whil
 This covers partition key design, why consumers can't exceed partition count, and the ordering tradeoff, which is the "design a Kafka pipeline" interview question in disguise. It's also the most common real capacity incident, because traffic skew usually shows up only after a big customer onboards.
 
 Do them in that order. Each one gives you a war story with a metric attached, which is what makes the answer sound like experience rather than reading.
+
+3. Create the Uber queue system.
+4. Replayable queue.
