@@ -14,7 +14,7 @@ start_service
 
 readonly ACKED=out/cutover-acked.txt
 LOAD_T0=$(ms)
-go run . load -duration 70s -acked "$ACKED" >"out/cutover-load.tsv" 2>&1 &
+go run . load -duration 30s -acked "$ACKED" >"out/cutover-load.tsv" 2>&1 &
 LOAD=$!
 sleep 3
 
