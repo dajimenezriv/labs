@@ -10,6 +10,17 @@ CREATE TABLE lab.flags (
   enabled boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+
+CREATE FUNCTION lab.flag_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := clock_timestamp();
+  PERFORM pg_notify('flags', NEW.key);
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER flag_changed
+BEFORE INSERT OR UPDATE ON lab.flags
+FOR EACH ROW EXECUTE FUNCTION lab.flag_changed();
 ```
 
 - **Writes are rare**: a few a day, from a human.
@@ -22,9 +33,9 @@ CREATE TABLE lab.flags (
 
 So `NOTIFY` is a latency optimisation over polling, but since is at-most-once we can miss updates. We need polling + listening.
 
-What to send in `NOTIFY`? Two options:
+What to send in `NOTIFY`?
 
-- Send the whole row. It's faster, but if we change a key twice it can deliver wrong. Also `pg_notify` caps the payload at **8000 bytes** and raises `22023 payload string too long`.
+- Send the whole row: faster, but if we change a key twice it can deliver wrong. Also `pg_notify` caps the payload at **8000 bytes** and raises `22023 payload string too long`.
 - Send just the updated key and then to a `SELECT` to check the updated value.
 
 ## 1. Propagation: polling versus listening
@@ -43,7 +54,7 @@ What to send in `NOTIFY`? Two options:
 - 20 instances.
 - Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 - Polling costs the same whether or not anything happens. Number of backends is `pool.MaxConns`.
-- Listening costs nothing at rest and scales with changes. Each listening session is a connection, because `LISTEN` cannot come from a pool.
+- Listening costs nothing at rest and scales with changes. Each listening session is a connection, because `LISTEN` cannot come from a pool. We need to be careful to not saturate `max_connections`.
 
 ## 2. The listener that stops listening
 
@@ -53,11 +64,11 @@ and the reconnect loop looks right:
 
 ```go
 for ctx.Err() == nil {
-    conn, err := pgx.Connect(ctx, dsn)      // reconnect
-    conn.Exec(ctx, "LISTEN flags")          // resubscribe
+    conn, err := pgx.Connect(ctx, dsn) // Reconnect.
+    conn.Exec(ctx, "LISTEN flags") // Resubscribe.
     for {
         n, err := conn.WaitForNotification(ctx)
-        if err != nil { break }             // dropped; go round again
+        if err != nil { break } // Dropped. Go round again.
         apply(n.Payload)
     }
 }
@@ -76,4 +87,5 @@ Every change published between the drop and the resubscribe is never delivered.
 
 - 20 instances.
 - Listening should have had 620 queries, but it missed 100.
+- Listening drops its connection 220 times.
 - All 20 instances had an stale value in at least one of their keys.
