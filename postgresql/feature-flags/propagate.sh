@@ -29,7 +29,6 @@ rule "2. cost at rest: 20 instances, 30s, no flag changes"
       "$(cut -d'|' -f7 "$out" | tr -d ' \t')" "$bk"
     rm -f "$out"
   }
-  idle poll   "-interval 1s"   1s
   idle poll   "-interval 5s"   5s
   idle listen ""               -
 } | column -t -s $'\t'

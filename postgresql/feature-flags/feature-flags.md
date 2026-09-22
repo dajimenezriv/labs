@@ -45,7 +45,6 @@ Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 | mode                  | every | queries in 30s | backends |
 | --------------------- | ----: | -------------: | -------: |
 | baseline (stack idle) |     - |              - |        1 |
-| poll                  |    1s |            640 |        9 |
 | poll                  |    5s |            140 |        9 |
 | listen                |     - |             20 |       22 |
 
