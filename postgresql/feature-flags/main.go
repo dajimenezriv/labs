@@ -16,9 +16,9 @@ import (
 )
 
 type flip struct {
-	key     string
-	version int64
-	at      time.Time
+	key       string
+	updatedAt time.Time
+	at        time.Time
 }
 
 func main() {
@@ -98,9 +98,9 @@ func main() {
 	for i := range *flips {
 		k := fmt.Sprintf("flag_%03d", rand.IntN(200)+1)
 		at := time.Now()
-		var v int64
+		var v time.Time
 		err := pool.QueryRow(ctx,
-			`UPDATE lab.flags SET enabled = NOT enabled WHERE key = $1 RETURNING version`, k).Scan(&v)
+			`UPDATE lab.flags SET enabled = NOT enabled WHERE key = $1 RETURNING updated_at`, k).Scan(&v)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -131,7 +131,7 @@ func main() {
 	missed := 0
 	for _, f := range issued {
 		for _, c := range caches {
-			if t, ok := c.arrival(f.key, f.version); ok {
+			if t, ok := c.arrival(f.key, f.updatedAt); ok {
 				lats = append(lats, t.Sub(f.at))
 			} else {
 				missed++
@@ -160,10 +160,10 @@ func main() {
 		missed, queries, notifs, drops, stale, staleAfter)
 }
 
-// Instances serving at least one flag at a version older than the committed
-// one. Counted per instance rather than per flag, because one instance with
-// one wrong kill switch is the incident.
-func staleInstances(caches []*Cache, truth map[string]int64) int {
+// Instances serving at least one flag older than what is committed. Counted
+// per instance rather than per flag, because one instance with one wrong kill
+// switch is the incident.
+func staleInstances(caches []*Cache, truth map[string]time.Time) int {
 	n := 0
 	for _, c := range caches {
 		if c.stale(truth) > 0 {
@@ -173,9 +173,9 @@ func staleInstances(caches []*Cache, truth map[string]int64) int {
 	return n
 }
 
-func warm(caches []*Cache, head int64) bool {
+func warm(caches []*Cache, head time.Time) bool {
 	for _, c := range caches {
-		if c.Head() < head {
+		if c.Head().Before(head) {
 			return false
 		}
 	}
@@ -199,8 +199,8 @@ func killer(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
 	}
 }
 
-func dbHead(ctx context.Context, pool *pgxpool.Pool) int64 {
-	var v int64
+func dbHead(ctx context.Context, pool *pgxpool.Pool) time.Time {
+	var v time.Time
 	if err := pool.QueryRow(ctx, headSQL).Scan(&v); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -208,17 +208,17 @@ func dbHead(ctx context.Context, pool *pgxpool.Pool) int64 {
 	return v
 }
 
-func dbFlags(ctx context.Context, pool *pgxpool.Pool) map[string]int64 {
-	rows, err := pool.Query(ctx, `SELECT key, version FROM lab.flags`)
+func dbFlags(ctx context.Context, pool *pgxpool.Pool) map[string]time.Time {
+	rows, err := pool.Query(ctx, `SELECT key, updated_at FROM lab.flags`)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer rows.Close()
-	out := map[string]int64{}
+	out := map[string]time.Time{}
 	for rows.Next() {
 		var k string
-		var v int64
+		var v time.Time
 		rows.Scan(&k, &v)
 		out[k] = v
 	}

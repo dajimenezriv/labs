@@ -33,9 +33,7 @@ makes a listener correct.
 ./propagate.sh
 ```
 
-20 instances, 30 flag changes a second apart. `p50/p99/max` are wall-clock
-from issuing the `UPDATE` to the flag being live in an instance's map;
-`queries` and `notifs` are totals across all 20.
+20 instances, 30 flag changes a second apart. `p50/p99/max` are wall-clock from issuing the `UPDATE` to the flag being live in an instance's map; `queries` and `notifs` are totals across all 20.
 
 | mode   | every |   p50ms |    p99ms |   maxms | queries | notifs |
 | ------ | ----: | ------: | -------: | ------: | ------: | -----: |
@@ -104,7 +102,7 @@ not replayed, and is never mentioned again.
 Same 20 instances and 30 changes, now terminating every listening backend
 every 5 seconds — `pg_terminate_backend`, which from the client is
 indistinguishable from all four real causes. `stale` counts instances serving
-at least one flag at an older version than the committed one, one second
+at least one flag older than what is committed, one second
 after the last change; `stale+settle` is the same count 25 seconds later.
 
 | mode   | every |  p50ms |       p99ms | missed | drops |     stale | stale+settle |
@@ -140,7 +138,7 @@ and it is why the fix below is polling.
 - **on every reconnect, reload the whole table** rather than only
   resubscribing. The gap is exactly where the missed changes are.
 - **a watchdog**, every 10 seconds, asking one indexed question —
-  `SELECT max(version) FROM lab.flags` — and reloading everything if the
+  `SELECT max(updated_at) FROM lab.flags` — and reloading everything if the
   answer is ahead of what this instance holds. It runs on the shared pool, not
   the listening connection, because it has to work in precisely the situation
   where that connection is the broken thing.
@@ -159,9 +157,10 @@ be the only mechanism.
 
 - **A staleness bound you cannot see.** Nothing errors, no metric moves, and
   `pg_stat_activity` shows a healthy connected listener. The only way to know
-  an instance is wrong is to ask it what version it holds. Export that, and
-  alert on the spread across instances — not on the listener being connected,
-  which it will be.
+  an instance is wrong is to ask it how old its newest flag is. Export that,
+  and
+  alert on the spread across instances — not on the listener being
+  connected, which it will be.
 - **A backend per instance, unpoolable.** 22 backends for 20 instances
   here, against 9 for polling. At a hundred instances that is a real fraction of
   `max_connections`, and it is the one connection in the service that cannot
