@@ -63,86 +63,17 @@ for ctx.Err() == nil {
 }
 ```
 
-It reconnects, it resubscribes, it succeeds, it logs nothing. And every change
-published between the drop and the resubscribe was delivered to nobody, is
-not replayed, and is never mentioned again.
+Every change published between the drop and the resubscribe is never delivered.
 
 ```bash
 ./resilience.sh
 ```
 
-Same 20 instances and 30 changes, now terminating every listening backend
-every 5 seconds — `pg_terminate_backend`, which from the client is
-indistinguishable from all four real causes. `stale` counts instances serving
-at least one flag older than what is committed, one second
-after the last change; `stale+settle` is the same count 25 seconds later.
+| mode   | every |  p50ms |  p99ms |  maxms | missed | queries | notifs | backends | drops | stale     |
+| ------ | ----: | -----: | -----: | -----: | -----: | ------: | -----: | -------: | ----- | --------- |
+| listen |     - |    8.5 |   15.4 |   15.7 |    100 |     520 |    500 |       22 | 220   | **20/20** |
+| poll   |    5s | 2852.7 | 4985.5 | 4987.1 |      0 |     240 |      0 |        8 | 0     | 0         |
 
-| mode   | every |  p50ms |      p99ms | missed | backends | drops |     stale | stale+settle |
-| ------ | ----: | -----: | ---------: | -----: | -------: | ----: | --------: | -----------: |
-| listen |     - |    8.4 | **2015.5** | **80** |       22 |   220 | **20/20** |    **20/20** |
-| poll   |    5s | 2862.2 |     4982.9 |      0 |        8 |     0 |         0 |            0 |
-
-Every one of the 20 instances ends up serving a flag at the wrong value, and
-25 seconds later every one of them still is. Nothing errored. Each instance
-reconnected within half a second, resubscribed successfully, and sat there
-healthy and wrong — `pg_stat_activity` shows twenty connected listeners the
-whole time.
-
-Two columns are worth reading carefully. `missed` counts 80 flag changes that
-never reached an instance at all, and a `p99` of 2 seconds — against 11 ms in
-the undisturbed control run above — is the changes that _did_ arrive, very
-late. Both come from the same mechanism: the only thing that can repair a
-missed notification is **another change to the same key**, because that is
-what triggers the next re-read of that row. A flag nobody touches again stays
-wrong forever; one that happens to be flipped again two seconds later gets
-silently repaired by the second flip. Neither outcome is something the
-instance can distinguish from working correctly.
-
-`poll` is in that table because it has nothing to lose. It holds no
-subscription and no position, so a dead connection costs it one interval.
-That is not a tuning difference, it is the structural argument for polling,
-and it is why the fix below is polling.
-
-### The fix is to keep polling, slowly
-
-Neither column in that table is a mode you should ship. `listen` is fast and
-silently wrong; `poll` is correct and seconds late. The fix is both at once,
-and it is small:
-
-- **on every reconnect, reload the whole table** rather than only
-  resubscribing. The gap is exactly where the missed changes are.
-- **keep a slow poll running underneath** — every 10 seconds or so, one
-  indexed question, `SELECT max(updated_at) FROM lab.flags`, reloading
-  everything only when the answer is ahead of what the instance holds. It
-  belongs on the shared pool rather than the listening connection, because it
-  has to work in precisely the situation where that connection is the broken
-  thing.
-
-The second one is what bounds staleness at the poll interval instead of at
-infinity, and it is far cheaper than the polling in the table above: an
-aggregate over an index, not the whole table, and no reload at all on the
-overwhelming majority of ticks where nothing changed.
-
-Notifications become the fast path and the slow poll becomes the correct one.
-Which is the same conclusion as the outbox in the Kafka lab from the other
-direction: the mechanism that is fast when everything works is not allowed to
-be the only mechanism.
-
-## What this costs you
-
-- **A staleness bound you cannot see.** Nothing errors, no metric moves, and
-  `pg_stat_activity` shows a healthy connected listener. The only way to know
-  an instance is wrong is to ask it how old its newest flag is. Export that,
-  and
-  alert on the spread across instances — not on the listener being
-  connected, which it will be.
-- **A backend per instance, unpoolable.** 22 backends for 20 instances
-  here, against 9 for polling. At a hundred instances that is a real fraction of
-  `max_connections`, and it is the one connection in the service that cannot
-  go behind a transaction-mode pooler — see
-  [connection-pooling.md](../connection-pooling/connection-pooling.md).
-- **An 8000-byte ceiling on the payload**, enforced against the `UPDATE`
-  rather than against delivery.
-- **No replay.** Everything above follows from this one line. If what you are
-  propagating cannot tolerate at-most-once, LISTEN/NOTIFY is the wrong
-  transport and the outbox is the right one.
+- 20 instances.
+- Listening should have had 620 queries, but it missed 100.
+- All 20 instances had an stale value in at least one of their keys.
