@@ -8,7 +8,6 @@ import (
 	"math/rand/v2"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,11 +27,6 @@ type flip struct {
 	key       string
 	updatedAt time.Time
 	at        time.Time
-}
-
-func die(err error, a ...any) {
-	fmt.Fprintln(os.Stderr, err, a)
-	os.Exit(1)
 }
 
 func main() {
@@ -57,21 +51,17 @@ func main() {
 	defer cancel()
 
 	// The shared pool every instance would already have for its own queries.
-	// Polling rides on it, and so does the watchdog -- neither needs a
-	// connection of its own, which is the whole difference from LISTEN.
-	cfg := must(pgxpool.ParseConfig(dsn))
+	// Polling rides on it and needs no connection of its own, which is the
+	// whole difference from LISTEN.
+	cfg := mustReturn(pgxpool.ParseConfig(dsn))
 	cfg.MaxConns = 8
 	cfg.ConnConfig.RuntimeParams["application_name"] = "flag-pool"
-	pool := must(pgxpool.NewWithConfig(ctx, cfg))
+	pool := mustReturn(pgxpool.NewWithConfig(ctx, cfg))
 	defer pool.Close()
 
 	// Tagged so -kill can find exactly these sessions and nothing else.
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	listenConnDSN := dsn + sep + "application_name=flag-listener"
-	must(pgx.ParseConfig(listenConnDSN))
+	listenConnDSN := dsn + "?application_name=flag-listener"
+	mustReturn(pgx.ParseConfig(listenConnDSN))
 
 	caches := make([]*Cache, instances)
 	var wg sync.WaitGroup
@@ -113,11 +103,8 @@ func main() {
 		k := fmt.Sprintf("flag_%03d", rand.IntN(200)+1)
 		at := time.Now()
 		var v time.Time
-		err := pool.QueryRow(ctx,
-			`UPDATE lab.flags SET enabled = NOT enabled WHERE key = $1 RETURNING updated_at`, k).Scan(&v)
-		if err != nil {
-			die(err)
-		}
+		must(pool.QueryRow(ctx,
+			`UPDATE lab.flags SET enabled = NOT enabled WHERE key = $1 RETURNING updated_at`, k).Scan(&v))
 		issued = append(issued, flip{k, v, at})
 		if i < flips-1 {
 			time.Sleep(gap)
@@ -125,8 +112,9 @@ func main() {
 	}
 
 	// A grace period long enough for a delivered notification to be applied
-	// and far too short for any watchdog to fire, so the "stale" column is
-	// what delivery alone achieved.
+	// (p50 is ~9ms) and shorter than any poll interval, so the "stale"
+	// column is what push delivery alone achieved. -settle then counts
+	// again much later, which is what separates "behind" from "never".
 	time.Sleep(time.Second)
 	stale := staleInstances(ctx, caches, pool)
 
@@ -179,10 +167,7 @@ func main() {
 // per instance rather than per flag, because one instance with one wrong kill
 // switch is the incident.
 func staleInstances(ctx context.Context, caches []*Cache, pool *pgxpool.Pool) int {
-	rows, err := pool.Query(ctx, `SELECT key, updated_at FROM lab.flags`)
-	if err != nil {
-		die(err)
-	}
+	rows := mustReturn(pool.Query(ctx, `SELECT key, updated_at FROM lab.flags`))
 	defer rows.Close()
 	truth := map[string]time.Time{}
 	for rows.Next() {
@@ -252,10 +237,8 @@ func watchBackends(ctx context.Context, pool *pgxpool.Pool, peak *atomic.Int64) 
 
 func dbHead(ctx context.Context, pool *pgxpool.Pool) time.Time {
 	var v time.Time
-	if err := pool.QueryRow(ctx,
-		`SELECT coalesce(max(updated_at), to_timestamp(0)) FROM lab.flags`).Scan(&v); err != nil {
-		die(err)
-	}
+	must(pool.QueryRow(ctx,
+		`SELECT coalesce(max(updated_at), to_timestamp(0)) FROM lab.flags`).Scan(&v))
 	return v
 }
 
@@ -266,9 +249,18 @@ func pct(sorted []time.Duration, p float64) float64 {
 	return float64(sorted[int(p*float64(len(sorted)-1))]) / 1e6
 }
 
-func must[T any](v T, err error) T {
+func mustReturn[T any](v T, err error) T {
+	must(err)
+	return v
+}
+
+func must(err error) {
 	if err != nil {
 		die(err)
 	}
-	return v
+}
+
+func die(err error, a ...any) {
+	fmt.Fprintln(os.Stderr, err, a)
+	os.Exit(1)
 }
