@@ -11,30 +11,21 @@ import (
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
 
-// The workload. Every order is paid exactly once, by exactly one worker, so
-// the order id is the identity of the write: an id in acked.txt that has no
-// payment row afterwards is a write the service acknowledged and lost.
-//
-// Each successful write is immediately read back through the same API. That
-// read is the one the migration breaks -- a client that writes and then
-// reads its own write is the first to notice that reads and writes are
-// pointed at two different databases.
 func load(args []string) {
 	fs := flag.NewFlagSet("load", flag.ExitOnError)
 	base := fs.String("url", "http://localhost:8088", "service base url")
 	workers := fs.Int("workers", 16, "concurrent clients")
 	rate := fs.Int("rate", 400, "target writes per second")
 	dur := fs.Duration("duration", 60*time.Second, "how long to run")
-	first := fs.Int64("first-order", 200001, "first unpaid order id")
-	last := fs.Int64("last-order", 500000, "last order id that exists")
 	timeout := fs.Duration("timeout", 3*time.Second, "per-request client timeout")
-	out := fs.String("acked", "out/acked.txt", "file to write acknowledged order ids to")
+	out := fs.String("acked", "out/acked.txt", "file to write acknowledged payment ids to")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -52,7 +43,6 @@ func load(args []string) {
 	defer acked.Flush()
 
 	var (
-		next    atomic.Int64
 		ok      atomic.Int64
 		failed  atomic.Int64
 		rawMiss atomic.Int64 // acknowledged, then not visible to the very next read
@@ -60,7 +50,6 @@ func load(args []string) {
 		lats    []time.Duration
 		errs    = map[string]int{}
 	)
-	next.Store(*first)
 
 	// The client timeout is the definition of downtime here: a write held
 	// longer than this is an error to the caller no matter what the
@@ -73,18 +62,19 @@ func load(args []string) {
 	tick := time.NewTicker(time.Second / time.Duration(*rate))
 	defer tick.Stop()
 
-	post := func(ctx context.Context, url string) (int, error) {
+	post := func(ctx context.Context, url string) (int, int64, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		defer resp.Body.Close()
-		io.Copy(io.Discard, resp.Body)
-		return resp.StatusCode, nil
+		b, _ := io.ReadAll(resp.Body)
+		id, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return resp.StatusCode, id, nil
 	}
 
 	var wg sync.WaitGroup
@@ -97,18 +87,8 @@ func load(args []string) {
 					return
 				}
 
-				// Every order is paid once, so the ids are consumed rather
-				// than reused. Running off the end of the seeded range would
-				// produce foreign key violations that have nothing to do
-				// with the migration, so the run stops instead.
-				id := next.Add(1)
-				if id > *last {
-					return
-				}
-				amount := (id%900 + 100) * 10
-
 				t0 := time.Now()
-				code, err := post(ctx, fmt.Sprintf("%s/pay?order_id=%d&amount=%d", *base, id, amount))
+				code, id, err := post(ctx, *base+"/pay")
 				d := time.Since(t0)
 				if ctx.Err() != nil {
 					return
@@ -191,7 +171,7 @@ func load(args []string) {
 
 func readBack(ctx context.Context, c *http.Client, base string, id int64) int {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/pay?order_id=%d", base, id), nil)
+		fmt.Sprintf("%s/pay?id=%d", base, id), nil)
 	if err != nil {
 		return -1
 	}

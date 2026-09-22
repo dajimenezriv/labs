@@ -18,9 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Where a request is served from. The migration is a sequence of changes to
-// these two values, and every interesting question in the lab is "what
-// happens to in-flight requests at the moment one of them changes".
+// Where a request is served from.
 const (
 	monolith = "monolith" // the original database
 	payments = "payments" // the new service's database
@@ -56,13 +54,8 @@ func serve(args []string) {
 	defer stop()
 
 	a := &app{writes: monolith, reads: monolith}
-	var err error
-	if a.mono, err = pgxpool.New(ctx, *monoDSN); err != nil {
-		die(err)
-	}
-	if a.pay, err = pgxpool.New(ctx, *payDSN); err != nil {
-		die(err)
-	}
+	a.mono = mustReturn(pgxpool.New(ctx, *monoDSN))
+	a.pay = mustReturn(pgxpool.New(ctx, *payDSN))
 	defer a.mono.Close()
 	defer a.pay.Close()
 
@@ -92,19 +85,7 @@ func (a *app) route() (writes, reads string) {
 	return a.writes, a.reads
 }
 
-// POST /pay?order_id=N&amount=N
-//
-// One row in lab.payments, written to whichever database currently owns the
-// table. The routing switch is the whole of the migration: the same write
-// goes to the monolith before the cutover and to the new database after it.
 func (a *app) handlePay(w http.ResponseWriter, r *http.Request) {
-	orderID, _ := strconv.ParseInt(r.URL.Query().Get("order_id"), 10, 64)
-	amount, _ := strconv.ParseInt(r.URL.Query().Get("amount"), 10, 64)
-	if orderID == 0 {
-		http.Error(w, "order_id required", http.StatusBadRequest)
-		return
-	}
-
 	// Held, not rejected. A request that waits 400 ms is slow; a request
 	// that gets a 503 is downtime. This is the line between the two.
 	a.gate.RLock()
@@ -114,31 +95,26 @@ func (a *app) handlePay(w http.ResponseWriter, r *http.Request) {
 	if writes, _ := a.route(); writes != monolith {
 		pool = a.pay
 	}
-	_, err := pool.Exec(r.Context(),
-		`INSERT INTO lab.payments (order_id, amount_cents, provider_ref) VALUES ($1, $2, $3)`,
-		orderID, amount, "svc-"+strconv.FormatInt(orderID, 10))
+	var id int64
+	err := pool.QueryRow(r.Context(),
+		`INSERT INTO lab.payments DEFAULT VALUES RETURNING id`).Scan(&id)
 	if err != nil {
 		a.failed.Add(1)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	a.ok.Add(1)
-	w.WriteHeader(http.StatusNoContent)
+	fmt.Fprint(w, id)
 }
 
-// GET /pay?order_id=N -> number of payments recorded for that order.
-//
-// In shadow mode the monolith still answers and the new database is queried
-// alongside it purely to be compared. That is the only way to find out what
-// cutting reads over would have returned without cutting them over.
 func (a *app) handleRead(w http.ResponseWriter, r *http.Request) {
-	orderID, _ := strconv.ParseInt(r.URL.Query().Get("order_id"), 10, 64)
+	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 	_, reads := a.route()
 
 	count := func(p *pgxpool.Pool) (int, error) {
 		var n int
 		err := p.QueryRow(r.Context(),
-			`SELECT count(*) FROM lab.payments WHERE order_id = $1`, orderID).Scan(&n)
+			`SELECT count(*) FROM lab.payments WHERE id = $1`, id).Scan(&n)
 		return n, err
 	}
 
@@ -219,6 +195,17 @@ func (a *app) handleStats(w http.ResponseWriter, r *http.Request) {
 		"failed":   a.failed.Load(),
 		"mismatch": a.mismatch.Load(),
 	})
+}
+
+func mustReturn[T any](v T, err error) T {
+	must(err)
+	return v
+}
+
+func must(err error) {
+	if err != nil {
+		die(err)
+	}
 }
 
 func die(err error) {

@@ -67,28 +67,17 @@ reset_monolith() {
   psql "$MONO" -q -v ON_ERROR_STOP=1 -f seed.sql >/dev/null
 }
 
-# The new service's schema. Hand-written, because logical replication does
-# not create anything: the table has to exist on the subscriber with matching
-# column names and types before the subscription can copy a single row.
-#
-# One thing is deliberately absent and one is deliberately present:
-#
-#   - no seed data. The COPY brings it.
-#   - the (order_id) index IS here, because indexes are not replicated
-#     either. Without it, every read in the new service is a sequential scan,
-#     and the subscriber's own apply path has nothing to look rows up by.
+# The table has to exist on the subscriber with matching column names and types.
+# We need to restore also the (created_at) index and and the sequence position.
 create_new_schema() {
   p "
     DROP SCHEMA IF EXISTS lab CASCADE;
     CREATE SCHEMA lab;
     CREATE TABLE lab.payments (
-      id           bigserial PRIMARY KEY,
-      order_id     bigint      NOT NULL,
-      amount_cents bigint      NOT NULL,
-      provider_ref text        NOT NULL,
-      created_at   timestamptz NOT NULL DEFAULT now()
+      id         bigserial   PRIMARY KEY,
+      created_at timestamptz NOT NULL DEFAULT now()
     );
-    CREATE INDEX ON lab.payments (order_id);
+    CREATE INDEX ON lab.payments (created_at);
   " >/dev/null
 }
 

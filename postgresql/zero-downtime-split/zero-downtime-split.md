@@ -152,9 +152,8 @@ They do not agree, and the disagreement is the useful part:
 ### What does not come across
 
 ```
-  sequence on monolith   204520
+  sequence on monolith   204313
   sequence on new db     1   <- every insert here collides
-  indexes                2 on monolith, 2 on new db (created by hand)
   replica identity       d (default: the primary key)
 ```
 
@@ -164,9 +163,11 @@ not sequences, and no DDL from that point on:
 - **The table** has to exist on the subscriber before the subscription can
   copy a single row, with matching column names and types. Nothing creates it
   for you, and a column type that does not match is found at apply time.
-- **The indexes** are written by hand too. Without the `(order_id)` index
-  every read in the new service is a sequential scan, and the number only
-  becomes visible when reads cut over.
+- **The indexes** are written by hand too. There is only a primary key here,
+  which the table definition brings with it, but a secondary index that
+  exists on the monolith and not on the subscriber turns every read in the
+  new service into a sequential scan — and it only becomes visible when
+  reads cut over.
 - **The sequence** is the one that ends the outage debate. 200 000 rows
   arrived carrying ids up to 204 520, and `payments_id_seq` on the new
   database is still at **1**. It is not broken, and nothing will report it as

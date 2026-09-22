@@ -36,7 +36,7 @@ printf '  now serving from       the new database\n'
 
 sleep 20
 printf '  written there since    %s rows\n' \
-  "$(p "SELECT count(*) FROM lab.payments WHERE provider_ref LIKE 'svc-%'")"
+  "$(p "SELECT count(*) FROM lab.payments WHERE id > 200000")"
 
 rule "2. what the monolith looks like from behind"
 
@@ -96,8 +96,8 @@ rule "5. nothing left behind"
 sort -n out/rollback-acked.txt > out/rollback-acked.sorted
 printf '  acknowledged writes    %s\n' "$(wc -l < out/rollback-acked.txt)"
 printf '  absent from monolith   %s\n' "$(psql "$MONO" -qtAX -v ON_ERROR_STOP=1 <<SQL
-CREATE TEMP TABLE acked (order_id bigint);
+CREATE TEMP TABLE acked (id bigint);
 \copy acked FROM 'out/rollback-acked.sorted'
-SELECT count(*) FROM acked a WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.order_id = a.order_id);
+SELECT count(*) FROM acked a WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.id = a.id);
 SQL
 )"

@@ -20,7 +20,7 @@ create_new_schema
 
 trap stop_service EXIT
 start_service
-"$BIN" load -duration 75s -first-order 200001 -acked out/backfill-acked.txt >out/backfill-load.tsv 2>&1 &
+"$BIN" load -duration 75s -acked out/backfill-acked.txt >out/backfill-load.tsv 2>&1 &
 LOAD=$!
 sleep 4
 
@@ -72,7 +72,7 @@ rule "3. what did not come across"
 
 printf '  sequence on monolith   %s\n' "$(m "SELECT last_value FROM lab.payments_id_seq")"
 printf '  sequence on new db     %s   <- every insert here collides\n' "$(p "SELECT last_value FROM lab.payments_id_seq")"
-printf '  indexes                %s on monolith, %s on new db (created by hand)\n' \
+printf '  indexes                %s on monolith, %s on new db\n' \
   "$(m "SELECT count(*) FROM pg_indexes WHERE tablename='payments'")" \
   "$(p "SELECT count(*) FROM pg_indexes WHERE tablename='payments'")"
 printf '  replica identity       %s (default: the primary key)\n' \

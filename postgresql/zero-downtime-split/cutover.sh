@@ -74,10 +74,10 @@ rule "4. what the new database ended up with"
 
 sort -n "$ACKED" > out/cutover-acked.sorted
 missing=$(psql "$PAY" -qtAX -v ON_ERROR_STOP=1 <<SQL
-CREATE TEMP TABLE acked (order_id bigint);
+CREATE TEMP TABLE acked (id bigint);
 \copy acked FROM 'out/cutover-acked.sorted'
 SELECT count(*) FROM acked a
-WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.order_id = a.order_id);
+WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.id = a.id);
 SQL
 )
 printf '  acknowledged writes    %s\n' "$(wc -l < "$ACKED")"

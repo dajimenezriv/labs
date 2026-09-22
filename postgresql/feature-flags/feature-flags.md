@@ -64,11 +64,11 @@ and the reconnect loop looks right:
 
 ```go
 for ctx.Err() == nil {
-    conn, err := pgx.Connect(ctx, dsn) // Reconnect.
-    conn.Exec(ctx, "LISTEN flags") // Resubscribe.
+    conn, err := pgx.Connect(ctx, dsn) // reconnect
+    conn.Exec(ctx, "LISTEN flags") // resubscribe
     for {
         n, err := conn.WaitForNotification(ctx)
-        if err != nil { break } // Dropped. Go round again.
+        if err != nil { break } // dropped; go round again
         apply(n.Payload)
     }
 }
