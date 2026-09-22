@@ -33,34 +33,22 @@ makes a listener correct.
 ./propagate.sh
 ```
 
-20 instances, 30 flag changes a second apart. `p50/p99/max` are wall-clock from issuing the `UPDATE` to the flag being live in an instance's map; `queries` and `notifs` are totals across all 20.
+20 instances. Each mode gets two rows: `flipping` is 30 flag changes a
+second apart, `idle` is 30 seconds with nothing changing at all. `p50/p99` are
+wall-clock from issuing the `UPDATE` to the flag being live in an instance's
+map; `queries`, `notifs` and `backends` cover all 20 instances, and
+`backends` is the peak sampled across the run.
 
-| mode   | every |   p50ms |    p99ms |   maxms | queries | notifs |
-| ------ | ----: | ------: | -------: | ------: | ------: | -----: |
-| poll   |    5s |  2966.4 |   4984.4 |  4984.4 |      40 |      0 |
-| listen |     - |     9.4 |     10.7 |    10.8 |     120 |    100 |
+| mode        | every |  p50ms |  p99ms | queries | notifs | backends |
+| ----------- | ----: | -----: | -----: | ------: | -----: | -------: |
+| poll        |    5s | 2873.9 | 4985.7 |     140 |      0 |        8 |
+| poll idle   |    5s |      - |      - |     140 |      0 |        8 |
+| listen      |     - |    8.5 |   11.4 |     620 |    600 |       21 |
+| listen idle |     - |      - |      - |      20 |      0 |       21 |
 
-Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
-
-| mode                  | every | queries in 30s | backends |
-| --------------------- | ----: | -------------: | -------: |
-| baseline (stack idle) |     - |              - |        1 |
-| poll                  |    5s |            140 |        9 |
-| listen                |     - |             20 |       22 |
-
-That is the trade in two numbers. Sub-second propagation by polling costs
-640 queries per 30 seconds, forever, to be told nothing changed. Listening
-costs 20 — one snapshot per instance at startup and nothing after — and lands
-in single-digit milliseconds.
-
-The `backends` column is where it charges you instead. Polling's 20 instances
-share 8 pooled connections; listening needs **22 backends for the same 20
-instances**, because `LISTEN` is session state and cannot come from a pool.
-One parked connection per instance, not shared, not returnable, counted
-against `max_connections` all day — and the one connection in the service
-that cannot sit behind a transaction-mode pooler, for the reasons in
-[connection-pooling.md](../connection-pooling/connection-pooling.md). At 100
-instances that is a capacity decision, not a detail.
+- Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
+- Polling costs the same whether or not anything happens. Number of backends is `pool.MaxConns`.
+- Listening costs nothing at rest and scales with changes. Each listening session is a connection, because `LISTEN` cannot come from a pool.
 
 ## 2. The listener that stops listening
 
@@ -94,10 +82,10 @@ indistinguishable from all four real causes. `stale` counts instances serving
 at least one flag older than what is committed, one second
 after the last change; `stale+settle` is the same count 25 seconds later.
 
-| mode   | every |  p50ms |       p99ms | missed | drops |     stale | stale+settle |
-| ------ | ----: | -----: | ----------: | -----: | ----: | --------: | -----------: |
-| listen |     - |    9.2 | **16128.2** | **80** |   220 | **20/20** |    **20/20** |
-| poll   |    5s | 2860.7 |      4982.5 |      0 |     0 |         0 |            0 |
+| mode   | every |  p50ms |      p99ms | missed | backends | drops |     stale | stale+settle |
+| ------ | ----: | -----: | ---------: | -----: | -------: | ----: | --------: | -----------: |
+| listen |     - |    8.4 | **2015.5** | **80** |       22 |   220 | **20/20** |    **20/20** |
+| poll   |    5s | 2862.2 |     4982.9 |      0 |        8 |     0 |         0 |            0 |
 
 Every one of the 20 instances ends up serving a flag at the wrong value, and
 25 seconds later every one of them still is. Nothing errored. Each instance
@@ -106,13 +94,14 @@ healthy and wrong — `pg_stat_activity` shows twenty connected listeners the
 whole time.
 
 Two columns are worth reading carefully. `missed` counts 80 flag changes that
-never reached an instance at all, and `p99` of 16 seconds is the changes that
-_did_ arrive, very late. Both come from the same mechanism: the only thing
-that can repair a missed notification is **another change to the same key**,
-because that is what triggers the next re-read of that row. A flag nobody
-touches again stays wrong forever, and one that happens to be flipped again
-16 seconds later gets silently repaired by the second flip. Neither outcome
-is something the instance can distinguish from working correctly.
+never reached an instance at all, and a `p99` of 2 seconds — against 11 ms in
+the undisturbed control run above — is the changes that _did_ arrive, very
+late. Both come from the same mechanism: the only thing that can repair a
+missed notification is **another change to the same key**, because that is
+what triggers the next re-read of that row. A flag nobody touches again stays
+wrong forever; one that happens to be flipped again two seconds later gets
+silently repaired by the second flip. Neither outcome is something the
+instance can distinguish from working correctly.
 
 `poll` is in that table because it has nothing to lose. It holds no
 subscription and no position, so a dead connection costs it one interval.

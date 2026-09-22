@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,7 +20,7 @@ const (
 	dsn       = "postgres://postgres:postgres@localhost:5555/db"
 	instances = 20
 	gap       = time.Second
-	maxFlips  = 5
+	maxFlips  = 30
 )
 
 type flip struct {
@@ -43,7 +44,7 @@ func main() {
 	}
 
 	if *header {
-		fmt.Println("mode\t| every\t| p50ms\t| p99ms\t| maxms\t| missed\t| queries\t| notifs\t| drops\t| stale\t| stale+settle")
+		fmt.Println("mode\t| every\t| p50ms\t| p99ms\t| maxms\t| missed\t| queries\t| notifs\t| backends\t| drops\t| stale\t| stale+settle")
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,6 +101,14 @@ func main() {
 		wg.Go(func() { killer(ctx, pool, *kill) })
 	}
 
+	// Sampled for the whole measurement rather than once, because the
+	// number that matters for capacity is the peak, not whatever happened
+	// to be open when somebody looked. Its own queries are deliberately not
+	// counted in the queries column -- that column is what the mechanism
+	// costs, not what watching it costs.
+	var peak atomic.Int64
+	wg.Go(func() { watchBackends(ctx, pool, &peak) })
+
 	issued := make([]flip, 0, flips)
 	for i := range flips {
 		k := fmt.Sprintf("flag_%03d", rand.IntN(200)+1)
@@ -121,8 +130,7 @@ func main() {
 	// and far too short for any watchdog to fire, so the "stale" column is
 	// what delivery alone achieved.
 	time.Sleep(time.Second)
-	truth := dbFlags(ctx, pool)
-	stale := staleInstances(caches, truth)
+	stale := staleInstances(caches, dbFlags(ctx, pool))
 
 	staleAfter := "-"
 	if *settle > 0 {
@@ -153,15 +161,20 @@ func main() {
 		drops += c.dropouts.Load()
 	}
 
+	label := *mode
+	if *idle {
+		label += " idle"
+	}
+
 	every := "-"
 	switch *mode {
 	case "poll":
 		every = interval.String()
 	}
 
-	fmt.Printf("%s\t| %s\t| %.1f\t| %.1f\t| %.1f\t| %d\t| %d\t| %d\t| %d\t| %d\t| %s\n",
-		*mode, every, pct(lats, 0.50), pct(lats, 0.99), pct(lats, 1.0),
-		missed, queries, notifs, drops, stale, staleAfter)
+	fmt.Printf("%s\t| %s\t| %.1f\t| %.1f\t| %.1f\t| %d\t| %d\t| %d\t| %d\t| %d\t| %d\t| %s\n",
+		label, every, pct(lats, 0.50), pct(lats, 0.99), pct(lats, 1.0),
+		missed, queries, notifs, peak.Load(), drops, stale, staleAfter)
 }
 
 // Instances serving at least one flag older than what is committed. Counted
@@ -199,6 +212,29 @@ func killer(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
 		case <-t.C:
 			pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
 			                WHERE application_name = 'flag-listener' AND pid <> pg_backend_pid()`)
+		}
+	}
+}
+
+// Client backends on the database, sampled twice a second, keeping the
+// maximum. LISTEN needs one session per instance and cannot share the pool,
+// so this is the column where that shows up.
+func watchBackends(ctx context.Context, pool *pgxpool.Pool, peak *atomic.Int64) {
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			var n int64
+			if pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			                       WHERE datname = 'db' AND backend_type = 'client backend'`).Scan(&n) != nil {
+				continue
+			}
+			if n > peak.Load() {
+				peak.Store(n)
+			}
 		}
 	}
 }
