@@ -1,0 +1,39 @@
+name: gateway
+
+include:
+  - ../shared/compose.yaml
+
+services:
+  redis:
+    image: redis:8.2-alpine
+    # No persistence: a rate limiter's state is worth nothing after a restart.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+      args:
+        BINARY: gateway
+    depends_on:
+      - service
+    environment:
+      ADMIN_PORT: 8001
+      SERVICE_URL: http://service:8002
+      PORT: 8000
+    ports:
+      - "8000:8000"
+
+  service:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+      args:
+        BINARY: service
+    environment:
+      PORT: 8002
