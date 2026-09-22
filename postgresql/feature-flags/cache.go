@@ -24,8 +24,6 @@ type Flag struct {
 	UpdatedAt time.Time
 }
 
-// One service instance's view of the flag table. The request path reads
-// Enabled; nothing on the request path talks to Postgres.
 type Cache struct {
 	mu    sync.RWMutex
 	flags map[string]Flag
@@ -41,7 +39,6 @@ type Cache struct {
 
 	queries  atomic.Int64 // round trips to Postgres
 	notifs   atomic.Int64 // notifications delivered
-	resyncs  atomic.Int64 // full reloads
 	dropouts atomic.Int64 // times the listening connection went away
 }
 
@@ -52,12 +49,6 @@ type step struct {
 }
 
 func newCache() *Cache { return &Cache{flags: map[string]Flag{}} }
-
-func (c *Cache) Enabled(key string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.flags[key].Enabled
-}
 
 func (c *Cache) apply(fs []Flag) {
 	now := time.Now()
@@ -136,7 +127,6 @@ func (c *Cache) load(ctx context.Context, q querier, sql string, args ...any) er
 // off the shared pool, so it costs no dedicated connection and the staleness
 // window is the interval.
 func (c *Cache) poll(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
-	c.resyncs.Add(1)
 	c.load(ctx, pool, snapshotSQL)
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -145,7 +135,6 @@ func (c *Cache) poll(ctx context.Context, pool *pgxpool.Pool, every time.Duratio
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.resyncs.Add(1)
 			c.load(ctx, pool, snapshotSQL)
 		}
 	}
@@ -175,7 +164,6 @@ func (c *Cache) listen(ctx context.Context, dsn string) {
 			continue
 		}
 		if first {
-			c.resyncs.Add(1)
 			c.load(ctx, conn, snapshotSQL)
 			first = false
 		}

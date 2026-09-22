@@ -71,7 +71,7 @@ func main() {
 		case "listen":
 			wg.Go(func() { c.listen(ctx, listenConnDSN) })
 		default:
-			die(fmt.Errorf("unknown -mode %q\n", *mode))
+			die(fmt.Errorf("unknown -mode %q", *mode))
 		}
 	}
 
@@ -247,7 +247,7 @@ func must(err error) {
 	}
 }
 
-func die(err error, a ...any) {
-	fmt.Fprintln(os.Stderr, err, a)
+func die(err error) {
+	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
 }
