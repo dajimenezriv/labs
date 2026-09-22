@@ -39,7 +39,6 @@ makes a listener correct.
 | ------ | ----: | ------: | -------: | ------: | ------: | -----: |
 | poll   |    5s |  2966.4 |   4984.4 |  4984.4 |      40 |      0 |
 | listen |     - |     9.4 |     10.7 |    10.8 |     120 |    100 |
-| resync |   10s |     8.8 |     10.7 |    10.8 |     120 |    100 |
 
 Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 
@@ -49,7 +48,6 @@ Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 | poll                  |    1s |            640 |        9 |
 | poll                  |    5s |            140 |        9 |
 | listen                |     - |             20 |       22 |
-| resync                |   10s |             80 |       29 |
 
 That is the trade in two numbers. Sub-second propagation by polling costs
 640 queries per 30 seconds, forever, to be told nothing changed. Listening
@@ -64,10 +62,6 @@ against `max_connections` all day — and the one connection in the service
 that cannot sit behind a transaction-mode pooler, for the reasons in
 [connection-pooling.md](../connection-pooling/connection-pooling.md). At 100
 instances that is a capacity decision, not a detail.
-
-`resync` costs 29 because its watchdogs run on the shared pool, which is the
-point of running them there: 20 dedicated listener sessions plus a pool that
-still behaves like a pool.
 
 ## 2. The listener that stops listening
 
@@ -104,7 +98,6 @@ after the last change; `stale+settle` is the same count 25 seconds later.
 | mode   | every |  p50ms |       p99ms | missed | drops |     stale | stale+settle |
 | ------ | ----: | -----: | ----------: | -----: | ----: | --------: | -----------: |
 | listen |     - |    9.2 | **16128.2** | **80** |   220 | **20/20** |    **20/20** |
-| resync |   10s |    9.1 |       508.2 |      0 |   220 |         0 |            0 |
 | poll   |    5s | 2860.7 |      4982.5 |      0 |     0 |         0 |            0 |
 
 Every one of the 20 instances ends up serving a flag at the wrong value, and
@@ -129,20 +122,23 @@ and it is why the fix below is polling.
 
 ### The fix is to keep polling, slowly
 
-`resync` differs from `listen` in two small ways:
+Neither column in that table is a mode you should ship. `listen` is fast and
+silently wrong; `poll` is correct and seconds late. The fix is both at once,
+and it is small:
 
 - **on every reconnect, reload the whole table** rather than only
   resubscribing. The gap is exactly where the missed changes are.
-- **a watchdog**, every 10 seconds, asking one indexed question —
-  `SELECT max(updated_at) FROM lab.flags` — and reloading everything if the
-  answer is ahead of what this instance holds. It runs on the shared pool, not
-  the listening connection, because it has to work in precisely the situation
-  where that connection is the broken thing.
+- **keep a slow poll running underneath** — every 10 seconds or so, one
+  indexed question, `SELECT max(updated_at) FROM lab.flags`, reloading
+  everything only when the answer is ahead of what the instance holds. It
+  belongs on the shared pool rather than the listening connection, because it
+  has to work in precisely the situation where that connection is the broken
+  thing.
 
-That second one is what fixes the table above, and its cost is visible in the
-`p99` column: 508 ms, which is the reconnect backoff. Changes that land while
-an instance is between connections are not lost, they are late by one
-backoff. Everything else still arrives in 9 ms.
+The second one is what bounds staleness at the poll interval instead of at
+infinity, and it is far cheaper than the polling in the table above: an
+aggregate over an index, not the whole table, and no reload at all on the
+overwhelming majority of ticks where nothing changed.
 
 Notifications become the fast path and the slow poll becomes the correct one.
 Which is the same conclusion as the outbox in the Kafka lab from the other

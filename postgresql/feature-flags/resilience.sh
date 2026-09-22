@@ -9,8 +9,7 @@ psql $DSN -f seed.sql
 rule "1. control: no interference, 30 changes 1s apart"
 {
   go run . -header
-  go run . -mode listen -flips 30 -settle 25s
-  go run . -mode resync -flips 30 -settle 25s
+  go run . -mode listen -settle 25s
 } | column -t -s $'\t'
 
 rule "2. every listening backend terminated every 5s"
@@ -23,7 +22,6 @@ rule "2. every listening backend terminated every 5s"
 # tuning difference, it is the entire structural argument for polling.
 {
   go run . -header
-  go run . -mode listen -flips 30 -kill 5s -settle 25s
-  go run . -mode resync -flips 30 -kill 5s -settle 25s
-  go run . -mode poll -interval 5s -flips 30 -kill 5s -settle 25s
+  go run . -mode listen -kill 5s -settle 25s
+  go run . -mode poll -interval 5s -kill 5s -settle 25s
 } | column -t -s $'\t'

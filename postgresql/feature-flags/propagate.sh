@@ -9,7 +9,6 @@ rule "1. propagation to 20 instances, 30 changes 1s apart"
   go run . -header
   go run . -mode poll -interval 5s
   go run . -mode listen
-  go run . -mode resync
 } | column -t -s $'\t'
 
 rule "2. cost at rest: 20 instances, 30s, no flag changes"
@@ -33,5 +32,4 @@ rule "2. cost at rest: 20 instances, 30s, no flag changes"
   idle poll   "-interval 1s"   1s
   idle poll   "-interval 5s"   5s
   idle listen ""               -
-  idle resync ""            10s
 } | column -t -s $'\t'

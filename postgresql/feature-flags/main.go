@@ -18,7 +18,6 @@ import (
 const (
 	dsn       = "postgres://postgres:postgres@localhost:5555/db"
 	instances = 20
-	watchdog  = 10 * time.Second
 	gap       = time.Second
 	maxFlips  = 5
 )
@@ -30,9 +29,9 @@ type flip struct {
 }
 
 func main() {
-	mode := flag.String("mode", "listen", "poll | listen | resync")
+	mode := flag.String("mode", "listen", "poll | listen")
 	interval := flag.Duration("interval", 5*time.Second, "poll interval (-mode poll)")
-	idle := flag.Bool("idle", false, "do flag changes")
+	idle := flag.Bool("idle", false, "issue no flag changes; measures the standing cost of the mechanism")
 	kill := flag.Duration("kill", 0, "terminate every listening backend this often; 0 never")
 	settle := flag.Duration("settle", 0, "wait this long after the last change before the final staleness count")
 	header := flag.Bool("header", false, "print the column header and exit")
@@ -76,9 +75,7 @@ func main() {
 		case "poll":
 			wg.Go(func() { c.poll(ctx, pool, *interval) })
 		case "listen":
-			wg.Go(func() { c.listen(ctx, listenConnDSN, pool, false, 0) })
-		case "resync":
-			wg.Go(func() { c.listen(ctx, listenConnDSN, pool, true, watchdog) })
+			wg.Go(func() { c.listen(ctx, listenConnDSN) })
 		default:
 			fmt.Fprintf(os.Stderr, "unknown -mode %q\n", *mode)
 			os.Exit(2)
@@ -160,8 +157,6 @@ func main() {
 	switch *mode {
 	case "poll":
 		every = interval.String()
-	case "resync":
-		every = watchdog.String()
 	}
 
 	fmt.Printf("%s\t| %s\t| %.1f\t| %.1f\t| %.1f\t| %d\t| %d\t| %d\t| %d\t| %d\t| %s\n",
@@ -210,7 +205,8 @@ func killer(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
 
 func dbHead(ctx context.Context, pool *pgxpool.Pool) time.Time {
 	var v time.Time
-	if err := pool.QueryRow(ctx, headSQL).Scan(&v); err != nil {
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(max(updated_at), to_timestamp(0)) FROM lab.flags`).Scan(&v); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

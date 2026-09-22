@@ -13,7 +13,6 @@ import (
 const (
 	snapshotSQL = `SELECT key, enabled, updated_at FROM lab.flags`
 	oneFlagSQL  = `SELECT key, enabled, updated_at FROM lab.flags WHERE key = $1`
-	headSQL     = `SELECT coalesce(max(updated_at), to_timestamp(0)) FROM lab.flags`
 )
 
 // Field order matches snapshotSQL and oneFlagSQL for RowToStructByPos. A
@@ -153,14 +152,9 @@ func (c *Cache) poll(ctx context.Context, pool *pgxpool.Pool, every time.Duratio
 }
 
 // listen: a dedicated session that LISTENs, with the reconnect loop everybody
-// writes. resync decides the one thing that separates the two versions of
-// this function -- whether coming back means re-reading the table, or only
-// re-subscribing to what happens next.
-func (c *Cache) listen(ctx context.Context, dsn string, pool *pgxpool.Pool, resync bool, watchdog time.Duration) {
-	if resync && watchdog > 0 {
-		go c.watch(ctx, pool, watchdog)
-	}
-
+// writes. The snapshot is taken once, on the first connection; a reconnect
+// only re-subscribes, which is the whole of what §2 measures.
+func (c *Cache) listen(ctx context.Context, dsn string) {
 	first := true
 	backoff := 500 * time.Millisecond
 
@@ -180,7 +174,7 @@ func (c *Cache) listen(ctx context.Context, dsn string, pool *pgxpool.Pool, resy
 			sleep(ctx, backoff)
 			continue
 		}
-		if first || resync {
+		if first {
 			c.resyncs.Add(1)
 			c.load(ctx, conn, snapshotSQL)
 			first = false
@@ -205,32 +199,6 @@ func (c *Cache) listen(ctx context.Context, dsn string, pool *pgxpool.Pool, resy
 		if ctx.Err() == nil {
 			c.dropouts.Add(1)
 			sleep(ctx, backoff)
-		}
-	}
-}
-
-// watch is the admission that delivery is not a guarantee. One indexed
-// lookup on the shared pool, slowly: it asks whether anything exists past
-// what this instance holds, and reloads if so. It runs on the pool rather
-// than the listening connection on purpose -- it has to still work in
-// exactly the situations where that connection is the broken thing.
-func (c *Cache) watch(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			c.queries.Add(1)
-			var head time.Time
-			if pool.QueryRow(ctx, headSQL).Scan(&head) != nil {
-				continue
-			}
-			if head.After(c.Head()) {
-				c.resyncs.Add(1)
-				c.load(ctx, pool, snapshotSQL)
-			}
 		}
 	}
 }
