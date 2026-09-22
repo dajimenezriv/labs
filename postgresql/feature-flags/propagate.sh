@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.sh"
 
-psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
+psql $DSN -f seed.sql
 
 rule "1. propagation to 20 instances, 30 changes 1s apart"
 # The poll intervals are the ones people actually pick. resync is listen plus
@@ -10,9 +10,7 @@ rule "1. propagation to 20 instances, 30 changes 1s apart"
 # that is the result being established -- §2 is where they diverge.
 {
   go run . -header
-  for i in 15s 5s 1s; do
-    go run . -mode poll -interval "$i" -flips 30
-  done
+  go run . -mode poll -interval 5s -flips 30
   go run . -mode listen -flips 30
   go run . -mode resync -flips 30
 } | column -t -s $'\t'

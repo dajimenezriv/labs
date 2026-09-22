@@ -15,8 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Fixed dimensions of the experiment: every script runs the same shape, so
-// these are constants rather than flags nobody ever varies.
 const (
 	dsn       = "postgres://postgres:postgres@localhost:5555/db"
 	instances = 20
@@ -101,6 +99,7 @@ func main() {
 
 	issued := make([]flip, 0, *flips)
 	for i := range *flips {
+		fmt.Printf("HEY")
 		k := fmt.Sprintf("flag_%03d", rand.IntN(200)+1)
 		at := time.Now()
 		var v time.Time

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Shared plumbing. Every script drives the same program against the same
-# stack, so the pieces live here once.
 
 set -euo pipefail
 cd "$(dirname "$0")"

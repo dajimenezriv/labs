@@ -4,7 +4,7 @@
 
 source "$(dirname "$0")/lib.sh"
 
-psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
+psql $DSN -f seed.sql
 
 rule "1. control: no interference, 30 changes 1s apart"
 {
