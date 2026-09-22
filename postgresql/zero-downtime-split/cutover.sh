@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-#
-# The cutover: freeze, drain, flip, thaw.
-#
-# The service stays up and under load throughout. What the run has to show is
-# that the writes it acknowledged before, during and after the flip are all
-# in the database that now owns them, and that nothing was rejected to get
-# that -- only held.
+
 source "$(dirname "$0")/lib.sh"
 
 mkdir -p out
-require_seed
+
+psql $MONO -f seed.sql
+
 teardown_replication
-reset_monolith
 create_new_schema
 
 trap stop_service EXIT
@@ -19,16 +14,15 @@ start_service
 
 readonly ACKED=out/cutover-acked.txt
 LOAD_T0=$(ms)
-"$BIN" load -duration 70s -acked "$ACKED" >"out/cutover-load.tsv" 2>&1 &
+go run . load -duration 70s -acked "$ACKED" >"out/cutover-load.tsv" 2>&1 &
 LOAD=$!
 sleep 3
 
-# Backfill. Covered by backfill.sh; here it is just the state the cutover
-# starts from.
 m "CREATE PUBLICATION payments_pub FOR TABLE lab.payments" >/dev/null
 p "CREATE SUBSCRIPTION payments_sub
    CONNECTION 'host=monolith port=5432 user=postgres password=postgres dbname=db'
    PUBLICATION payments_pub" >/dev/null
+
 while [[ "$(sub_state)" != "r" ]]; do :; done
 
 rule "1. shadow reads: what cutting reads over today would have returned"

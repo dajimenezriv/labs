@@ -121,31 +121,17 @@ do_cutover() {
   local t
   t0=$(ms)
 
-  # Held, not rejected, and it does not return until the writes already in
-  # flight have committed. After this line the monolith's payments table is
-  # a fixed target, which is the only condition under which "caught up"
-  # means anything.
-  #
-  # The freeze covers everything down to the thaw, not just the drain: a
-  # write that landed on the monolith after the subscription was dropped
-  # would be carried by neither direction and orphaned there for good.
   ctl 'freeze=on'
   quiesce=$(( $(ms) - t0 ))
 
-  # Drain. The gate is rows, not LSNs -- see below for why.
   t=$(ms)
   while (( $(rows_pay) < $(rows_mono) )); do :; done
   drain=$(( $(ms) - t ))
   outstanding=$(lag_bytes)
 
-  # The forward subscription goes before the new database starts generating
-  # its own ids, or the two streams collide in the same table.
-  t=$(ms); p "DROP SUBSCRIPTION payments_sub" >/dev/null; dropsub=$(( $(ms) - t ))
+  t=$(ms)
+  p "DROP SUBSCRIPTION payments_sub" >/dev/null; dropsub=$(( $(ms) - t ))
 
-  # Logical replication copies rows. It does not copy the sequence that
-  # produced their ids, so without this the new database's sequence is still
-  # at 1 and its first insert claims a primary key that arrived in the COPY.
-  # After the drain, because the drain is what decides what the highest id is.
   t=$(ms)
   p "SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
   seqfix=$(( $(ms) - t ))
@@ -160,7 +146,9 @@ do_cutover() {
      PUBLICATION rollback_pub WITH (copy_data = false)" >/dev/null
   reverse=$(( $(ms) - t ))
 
-  t=$(ms); ctl 'writes=payments&reads=payments'; flip=$(( $(ms) - t ))
+  t=$(ms)
+  ctl 'writes=payments&reads=payments'
+  flip=$(( $(ms) - t ))
 
   ctl 'freeze=off'
   total=$(( $(ms) - t0 ))

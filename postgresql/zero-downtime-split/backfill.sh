@@ -11,9 +11,10 @@ create_new_schema
 
 trap stop_service EXIT
 start_service
+
 go run . load -duration 20s -acked out/backfill-acked.txt >out/backfill-load.tsv 2>&1 &
 LOAD=$!
-sleep 4
+sleep 3
 
 rule "1. the copy, while the table is being written to"
 
