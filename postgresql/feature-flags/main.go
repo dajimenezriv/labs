@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand/v2"
@@ -27,6 +28,11 @@ type flip struct {
 	key       string
 	updatedAt time.Time
 	at        time.Time
+}
+
+func die(err error, a ...any) {
+	fmt.Fprintln(os.Stderr, err, a)
+	os.Exit(1)
 }
 
 func main() {
@@ -78,8 +84,7 @@ func main() {
 		case "listen":
 			wg.Go(func() { c.listen(ctx, listenConnDSN) })
 		default:
-			fmt.Fprintf(os.Stderr, "unknown -mode %q\n", *mode)
-			os.Exit(2)
+			die(fmt.Errorf("unknown -mode %q\n", *mode))
 		}
 	}
 
@@ -93,19 +98,13 @@ func main() {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if !warm(caches, head) {
-		fmt.Fprintln(os.Stderr, "instances never warmed up")
-		os.Exit(1)
+		die(errors.New("instances never warmed up"))
 	}
 
 	if *kill > 0 {
 		wg.Go(func() { killer(ctx, pool, *kill) })
 	}
 
-	// Sampled for the whole measurement rather than once, because the
-	// number that matters for capacity is the peak, not whatever happened
-	// to be open when somebody looked. Its own queries are deliberately not
-	// counted in the queries column -- that column is what the mechanism
-	// costs, not what watching it costs.
 	var peak atomic.Int64
 	wg.Go(func() { watchBackends(ctx, pool, &peak) })
 
@@ -117,8 +116,7 @@ func main() {
 		err := pool.QueryRow(ctx,
 			`UPDATE lab.flags SET enabled = NOT enabled WHERE key = $1 RETURNING updated_at`, k).Scan(&v)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			die(err)
 		}
 		issued = append(issued, flip{k, v, at})
 		if i < flips-1 {
@@ -130,12 +128,12 @@ func main() {
 	// and far too short for any watchdog to fire, so the "stale" column is
 	// what delivery alone achieved.
 	time.Sleep(time.Second)
-	stale := staleInstances(caches, dbFlags(ctx, pool))
+	stale := staleInstances(ctx, caches, pool)
 
 	staleAfter := "-"
 	if *settle > 0 {
 		time.Sleep(*settle)
-		staleAfter = fmt.Sprint(staleInstances(caches, dbFlags(ctx, pool)))
+		staleAfter = fmt.Sprint(staleInstances(ctx, caches, pool))
 	}
 
 	cancel()
@@ -180,7 +178,20 @@ func main() {
 // Instances serving at least one flag older than what is committed. Counted
 // per instance rather than per flag, because one instance with one wrong kill
 // switch is the incident.
-func staleInstances(caches []*Cache, truth map[string]time.Time) int {
+func staleInstances(ctx context.Context, caches []*Cache, pool *pgxpool.Pool) int {
+	rows, err := pool.Query(ctx, `SELECT key, updated_at FROM lab.flags`)
+	if err != nil {
+		die(err)
+	}
+	defer rows.Close()
+	truth := map[string]time.Time{}
+	for rows.Next() {
+		var k string
+		var v time.Time
+		rows.Scan(&k, &v)
+		truth[k] = v
+	}
+
 	n := 0
 	for _, c := range caches {
 		if c.stale(truth) > 0 {
@@ -243,27 +254,9 @@ func dbHead(ctx context.Context, pool *pgxpool.Pool) time.Time {
 	var v time.Time
 	if err := pool.QueryRow(ctx,
 		`SELECT coalesce(max(updated_at), to_timestamp(0)) FROM lab.flags`).Scan(&v); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		die(err)
 	}
 	return v
-}
-
-func dbFlags(ctx context.Context, pool *pgxpool.Pool) map[string]time.Time {
-	rows, err := pool.Query(ctx, `SELECT key, updated_at FROM lab.flags`)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	defer rows.Close()
-	out := map[string]time.Time{}
-	for rows.Next() {
-		var k string
-		var v time.Time
-		rows.Scan(&k, &v)
-		out[k] = v
-	}
-	return out
 }
 
 func pct(sorted []time.Duration, p float64) float64 {
@@ -275,8 +268,7 @@ func pct(sorted []time.Duration, p float64) float64 {
 
 func must[T any](v T, err error) T {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		die(err)
 	}
 	return v
 }

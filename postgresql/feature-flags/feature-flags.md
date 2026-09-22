@@ -44,7 +44,7 @@ map; `queries`, `notifs` and `backends` cover all 20 instances, and
 | poll        |    5s | 2873.9 | 4985.7 |     140 |      0 |        8 |
 | poll idle   |    5s |      - |      - |     140 |      0 |        8 |
 | listen      |     - |    8.5 |   11.4 |     620 |    600 |       21 |
-| listen idle |     - |      - |      - |      20 |      0 |       21 |
+| listen idle |     - |      - |      - |      20 |      0 |       22 |
 
 - Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 - Polling costs the same whether or not anything happens. Number of backends is `pool.MaxConns`.
