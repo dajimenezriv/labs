@@ -5,14 +5,11 @@ source "$(dirname "$0")/lib.sh"
 psql $DSN -f seed.sql
 
 rule "1. propagation to 20 instances, 30 changes 1s apart"
-# The poll intervals are the ones people actually pick. resync is listen plus
-# a watchdog; on this path it should be indistinguishable from listen, and
-# that is the result being established -- §2 is where they diverge.
 {
   go run . -header
-  go run . -mode poll -interval 5s -flips 30
-  go run . -mode listen -flips 30
-  go run . -mode resync -flips 30
+  go run . -mode poll -interval 5s
+  go run . -mode listen
+  go run . -mode resync
 } | column -t -s $'\t'
 
 rule "2. cost at rest: 20 instances, 30s, no flag changes"
@@ -24,7 +21,7 @@ rule "2. cost at rest: 20 instances, 30s, no flag changes"
   printf 'baseline (stack idle)\t| -\t| -\t| %s\n' "$(backends)"
   idle() {
     local mode=$1 every=$2 label=$3 out; out=$(mktemp)
-    go run . -mode "$mode" $every -flips 0 -settle 30s >"$out" &
+    go run . -mode "$mode" $every -idle -settle 30s >"$out" &
     local pid=$!
     sleep 15
     local bk; bk=$(backends)

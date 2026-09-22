@@ -37,15 +37,11 @@ makes a listener correct.
 
 | mode   | every |   p50ms |    p99ms |   maxms | queries | notifs |
 | ------ | ----: | ------: | -------: | ------: | ------: | -----: |
-| poll   |   15s |  7832.7 |  15002.9 | 15003.3 |      60 |      0 |
-| poll   |    5s |  2861.0 |   4984.5 |  4987.7 |     140 |      0 |
-| poll   |    1s |   852.9 |    982.5 |   983.5 |     620 |      0 |
-| listen |     - | **9.3** | **10.8** |    12.0 |     620 |    600 |
-| resync |   10s |     9.2 |     12.8 |    13.1 |     680 |    600 |
+| poll   |    5s |  2966.4 |   4984.4 |  4984.4 |      40 |      0 |
+| listen |     - |     9.4 |     10.7 |    10.8 |     120 |    100 |
+| resync |   10s |     8.8 |     10.7 |    10.8 |     120 |    100 |
 
-Polling's p99 is the interval and its p50 is half of it, which is arithmetic
-rather than a finding. The finding is the standing cost, with nothing
-happening at all:
+Polling's p99 is the interval and its p50 is half of it, which is arithmetic.
 
 | mode                  | every | queries in 30s | backends |
 | --------------------- | ----: | -------------: | -------: |

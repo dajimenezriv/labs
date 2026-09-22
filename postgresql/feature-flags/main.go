@@ -20,6 +20,7 @@ const (
 	instances = 20
 	watchdog  = 10 * time.Second
 	gap       = time.Second
+	maxFlips  = 5
 )
 
 type flip struct {
@@ -31,11 +32,16 @@ type flip struct {
 func main() {
 	mode := flag.String("mode", "listen", "poll | listen | resync")
 	interval := flag.Duration("interval", 5*time.Second, "poll interval (-mode poll)")
-	flips := flag.Int("flips", 20, "flag changes to issue")
+	idle := flag.Bool("idle", false, "do flag changes")
 	kill := flag.Duration("kill", 0, "terminate every listening backend this often; 0 never")
 	settle := flag.Duration("settle", 0, "wait this long after the last change before the final staleness count")
 	header := flag.Bool("header", false, "print the column header and exit")
 	flag.Parse()
+
+	flips := maxFlips
+	if *idle {
+		flips = 0
+	}
 
 	if *header {
 		fmt.Println("mode\t| every\t| p50ms\t| p99ms\t| maxms\t| missed\t| queries\t| notifs\t| drops\t| stale\t| stale+settle")
@@ -97,9 +103,8 @@ func main() {
 		wg.Go(func() { killer(ctx, pool, *kill) })
 	}
 
-	issued := make([]flip, 0, *flips)
-	for i := range *flips {
-		fmt.Printf("HEY")
+	issued := make([]flip, 0, flips)
+	for i := range flips {
 		k := fmt.Sprintf("flag_%03d", rand.IntN(200)+1)
 		at := time.Now()
 		var v time.Time
@@ -110,7 +115,7 @@ func main() {
 			os.Exit(1)
 		}
 		issued = append(issued, flip{k, v, at})
-		if i < *flips-1 {
+		if i < flips-1 {
 			time.Sleep(gap)
 		}
 	}
