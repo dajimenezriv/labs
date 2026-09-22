@@ -29,7 +29,11 @@ require_seed() {
 # Its routing always starts where the migration starts: everything on the
 # monolith.
 start_service() {
-  go run . serve >out/serve.log 2>&1 &
+  # Built, not "go run". go run leaves a compiled child that is not $!, so
+  # killing $! leaves a server holding :8088 -- and the next run's health
+  # check then passes against the *previous* run's process.
+  go build -o "$BIN" .
+  "$BIN" serve >out/serve.log 2>&1 &
   SERVICE_PID=$!
   for _ in $(seq 50); do
     curl -fsS "$SVC/stats" >/dev/null 2>&1 && break
@@ -38,7 +42,14 @@ start_service() {
   ctl 'writes=monolith&reads=monolith&reset=1'
 }
 
-stop_service() { [[ -n ${SERVICE_PID:-} ]] && kill "$SERVICE_PID" 2>/dev/null; wait 2>/dev/null || true; }
+# Must not end on a failing command: bash propagates an EXIT trap's status,
+# so a kill of an already-dead process makes the whole script exit 1.
+stop_service() {
+  if [[ -n ${SERVICE_PID:-} ]]; then
+    kill "$SERVICE_PID" 2>/dev/null || true
+  fi
+  wait 2>/dev/null || true
+}
 
 # Tear the replication down to nothing. Subscriptions own a slot on the
 # publisher, so the order matters: drop the subscriber side first, or the
@@ -66,18 +77,51 @@ reset_monolith() {
   psql "$MONO" -q -v ON_ERROR_STOP=1 -f seed.sql >/dev/null
 }
 
-# The table has to exist on the subscriber with matching column names and types.
-# We need to restore also the (created_at) index and and the sequence position.
+# The tables, and nothing else. This is what you get if you read the manual,
+# create what the subscription needs, and stop there -- which is what
+# everyone does, because nothing tells you the list is longer than that.
+#
+# Three things the monolith has are missing, and section 3 of backfill.sh
+# puts a number on each: the (order_id) index, the foreign key, and the two
+# sequence positions.
 create_new_schema() {
   p "
     DROP SCHEMA IF EXISTS lab CASCADE;
     CREATE SCHEMA lab;
-    CREATE TABLE lab.payments (
+    CREATE TABLE lab.orders (
       id         bigserial   PRIMARY KEY,
       created_at timestamptz NOT NULL DEFAULT now()
     );
-    CREATE INDEX ON lab.payments (created_at);
+    CREATE TABLE lab.payments (
+      id         bigserial   PRIMARY KEY,
+      order_id   bigint      NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
   " >/dev/null
+}
+
+# The rest of the schema, which has to wait until the rows are there: the
+# foreign key validates every existing row when it is added, so adding it
+# before the COPY validates nothing and adding it during the COPY races it.
+finish_new_schema() {
+  p "CREATE INDEX ON lab.payments (order_id)" >/dev/null
+  p "ALTER TABLE lab.payments
+       ADD CONSTRAINT payments_order_id_fkey
+       FOREIGN KEY (order_id) REFERENCES lab.orders (id)" >/dev/null
+}
+
+# The read path's own query. Not a synthetic benchmark -- it is exactly what
+# GET /pay runs, which is why a missing index here shows up as service
+# latency rather than as a number in a report nobody reads.
+readonly READ_Q="SELECT count(*) FROM lab.payments WHERE order_id = 100000"
+
+# Execution time and the access method the planner chose, from one EXPLAIN.
+scan() {
+  local db=$1 plan
+  plan=$($db "EXPLAIN (ANALYZE, BUFFERS OFF) $READ_Q")
+  printf '%9s ms   %s\n' \
+    "$(sed -n 's/.*Execution Time: \([0-9.]*\) ms.*/\1/p' <<<"$plan")" \
+    "$(grep -om1 'Seq Scan\|Index Scan\|Index Only Scan\|Bitmap Heap Scan' <<<"$plan")"
 }
 
 # How far behind the subscriber is, in bytes of WAL the publisher has
@@ -107,18 +151,30 @@ rows_behind() {
 }
 
 # srsubstate: i initialising, d copying, f copy finished, s synchronised,
-# r ready (streaming). 'r' is the only state in which the subscription is
-# actually following the publisher.
-sub_state() { p "SELECT srsubstate FROM pg_subscription_rel LIMIT 1"; }
+# r ready (streaming). Each table syncs independently, with its own worker
+# and its own state, so the subscription is only following the publisher
+# once every one of them says 'r'. This returns how many do not yet.
+tables_syncing() { p "SELECT count(*) FROM pg_subscription_rel WHERE srsubstate <> 'r'"; }
 
-rows_mono() { m 'SELECT count(*) FROM lab.payments'; }
-rows_pay()  { p 'SELECT count(*) FROM lab.payments'; }
+rows_mono() { m 'SELECT (SELECT count(*) FROM lab.orders) + (SELECT count(*) FROM lab.payments)'; }
+rows_pay()  { p 'SELECT (SELECT count(*) FROM lab.orders) + (SELECT count(*) FROM lab.payments)'; }
 
 # The cutover itself. Five statements, and their order is the whole
 # difference between a held request and an outage. The timings come back in
 # globals so the caller can print them.
 do_cutover() {
   local t
+
+  # Never freeze into a backlog. The freeze lasts as long as whatever the
+  # subscriber still has to apply, so freezing while it is behind makes the
+  # outage the size of the queue. Wait until it is nearly caught up with
+  # writes still flowing -- that costs nobody anything -- and only then
+  # freeze and drain the small remainder.
+  #
+  # The threshold is not zero because rows_behind cannot resolve below its
+  # own sampling skew, which is ~25 rows at this write rate.
+  while (( $(rows_behind) > 100 )); do :; done
+
   t0=$(ms)
 
   ctl 'freeze=on'
@@ -133,14 +189,15 @@ do_cutover() {
   p "DROP SUBSCRIPTION payments_sub" >/dev/null; dropsub=$(( $(ms) - t ))
 
   t=$(ms)
-  p "SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
+  p "SELECT setval('lab.orders_id_seq',   (SELECT max(id) + 1000 FROM lab.orders));
+     SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
   seqfix=$(( $(ms) - t ))
 
   # Rollback is a subscription pointing the other way, and it has to be
   # created now rather than when it is needed: copy_data = false means it
   # carries everything written from this moment on, and nothing before it.
   t=$(ms)
-  p "CREATE PUBLICATION rollback_pub FOR TABLE lab.payments" >/dev/null
+  p "CREATE PUBLICATION rollback_pub FOR TABLE lab.orders, lab.payments" >/dev/null
   m "CREATE SUBSCRIPTION rollback_sub
      CONNECTION 'host=payments port=5432 user=postgres password=postgres dbname=db'
      PUBLICATION rollback_pub WITH (copy_data = false)" >/dev/null

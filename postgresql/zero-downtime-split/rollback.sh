@@ -23,11 +23,13 @@ LOAD_T0=$(ms)
 LOAD=$!
 sleep 3
 
-m "CREATE PUBLICATION payments_pub FOR TABLE lab.payments" >/dev/null
+m "CREATE PUBLICATION payments_pub FOR TABLE lab.orders, lab.payments" >/dev/null
 p "CREATE SUBSCRIPTION payments_sub
    CONNECTION 'host=monolith port=5432 user=postgres password=postgres dbname=db'
    PUBLICATION payments_pub" >/dev/null
-while [[ "$(sub_state)" != "r" ]]; do :; done
+
+while (( $(tables_syncing) > 0 )); do :; done
+finish_new_schema
 
 rule "1. out (the same cutover, quietly)"
 do_cutover
@@ -36,7 +38,7 @@ printf '  now serving from       the new database\n'
 
 sleep 20
 printf '  written there since    %s rows\n' \
-  "$(p "SELECT count(*) FROM lab.payments WHERE id > 200000")"
+  "$(p "SELECT count(*) FROM lab.orders WHERE id > 200000")"
 
 rule "2. what the monolith looks like from behind"
 
@@ -66,11 +68,12 @@ m "DROP SUBSCRIPTION rollback_sub" >/dev/null
 p "DROP PUBLICATION rollback_pub" >/dev/null
 
 # The step §2 was about.
-m "SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
+m "SELECT setval('lab.orders_id_seq',   (SELECT max(id) + 1000 FROM lab.orders));
+   SELECT setval('lab.payments_id_seq', (SELECT max(id) + 1000 FROM lab.payments))" >/dev/null
 
 # Forward replication again, so the monolith is once more the source and the
 # next attempt does not start from a backfill.
-m "CREATE PUBLICATION payments_pub FOR TABLE lab.payments" >/dev/null 2>&1 || true
+m "CREATE PUBLICATION payments_pub FOR TABLE lab.orders, lab.payments" >/dev/null 2>&1 || true
 p "DROP SCHEMA IF EXISTS lab CASCADE" >/dev/null
 create_new_schema
 p "CREATE SUBSCRIPTION payments_sub
@@ -96,8 +99,8 @@ rule "5. nothing left behind"
 sort -n out/rollback-acked.txt > out/rollback-acked.sorted
 printf '  acknowledged writes    %s\n' "$(wc -l < out/rollback-acked.txt)"
 printf '  absent from monolith   %s\n' "$(psql "$MONO" -qtAX -v ON_ERROR_STOP=1 <<SQL
-CREATE TEMP TABLE acked (id bigint);
+CREATE TEMP TABLE acked (order_id bigint);
 \copy acked FROM 'out/rollback-acked.sorted'
-SELECT count(*) FROM acked a WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.id = a.id);
+SELECT count(*) FROM acked a WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.order_id = a.order_id);
 SQL
 )"

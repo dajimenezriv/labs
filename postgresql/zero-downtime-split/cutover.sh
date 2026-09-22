@@ -18,12 +18,13 @@ go run . load -duration 70s -acked "$ACKED" >"out/cutover-load.tsv" 2>&1 &
 LOAD=$!
 sleep 3
 
-m "CREATE PUBLICATION payments_pub FOR TABLE lab.payments" >/dev/null
+m "CREATE PUBLICATION payments_pub FOR TABLE lab.orders, lab.payments" >/dev/null
 p "CREATE SUBSCRIPTION payments_sub
    CONNECTION 'host=monolith port=5432 user=postgres password=postgres dbname=db'
    PUBLICATION payments_pub" >/dev/null
 
-while [[ "$(sub_state)" != "r" ]]; do :; done
+while (( $(tables_syncing) > 0 )); do :; done
+finish_new_schema
 
 rule "1. shadow reads: what cutting reads over today would have returned"
 
@@ -68,10 +69,10 @@ rule "4. what the new database ended up with"
 
 sort -n "$ACKED" > out/cutover-acked.sorted
 missing=$(psql "$PAY" -qtAX -v ON_ERROR_STOP=1 <<SQL
-CREATE TEMP TABLE acked (id bigint);
+CREATE TEMP TABLE acked (order_id bigint);
 \copy acked FROM 'out/cutover-acked.sorted'
 SELECT count(*) FROM acked a
-WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.id = a.id);
+WHERE NOT EXISTS (SELECT 1 FROM lab.payments p WHERE p.order_id = a.order_id);
 SQL
 )
 printf '  acknowledged writes    %s\n' "$(wc -l < "$ACKED")"

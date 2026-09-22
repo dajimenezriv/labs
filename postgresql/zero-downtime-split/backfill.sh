@@ -21,7 +21,7 @@ rule "1. the copy, while the table is being written to"
 before_mono=$(rows_mono)
 t0=$(ms)
 
-m "CREATE PUBLICATION payments_pub FOR TABLE lab.payments" >/dev/null
+m "CREATE PUBLICATION payments_pub FOR TABLE lab.orders, lab.payments" >/dev/null
 p "CREATE SUBSCRIPTION payments_sub
    CONNECTION 'host=monolith port=5432 user=postgres password=postgres dbname=db'
    PUBLICATION payments_pub" >/dev/null
@@ -29,7 +29,7 @@ p "CREATE SUBSCRIPTION payments_sub
 # 'r' is ready-to-stream. The initial COPY is done and the subscription is
 # now following the publisher, which is a different thing from being at the
 # head of it.
-while [[ "$(sub_state)" != "r" ]]; do :; done
+while (( $(tables_syncing) > 0 )); do :; done
 copy_ms=$(( $(ms) - t0 ))
 
 after_mono=$(rows_mono)
@@ -54,12 +54,19 @@ done
 
 rule "3. what did not come across"
 
-printf '  sequence on monolith   %s\n' "$(m "SELECT last_value FROM lab.payments_id_seq")"
-printf '  sequence on new db     %s   <- every insert here collides\n' "$(p "SELECT last_value FROM lab.payments_id_seq")"
-printf '  indexes                %s on monolith, %s on new db\n' \
-  "$(m "SELECT count(*) FROM pg_indexes WHERE tablename='payments'")" \
-  "$(p "SELECT count(*) FROM pg_indexes WHERE tablename='payments'")"
-printf '  replica identity       %s (default: the primary key)\n' \
+printf '  orders_id_seq          %8s on monolith, %s on new db\n' \
+  "$(m "SELECT last_value FROM lab.orders_id_seq")" \
+  "$(p "SELECT last_value FROM lab.orders_id_seq")"
+printf '  payments_id_seq        %8s on monolith, %s on new db\n' \
+  "$(m "SELECT last_value FROM lab.payments_id_seq")" \
+  "$(p "SELECT last_value FROM lab.payments_id_seq")"
+printf '  indexes                %8s on monolith, %s on new db\n' \
+  "$(m "SELECT count(*) FROM pg_indexes WHERE schemaname='lab'")" \
+  "$(p "SELECT count(*) FROM pg_indexes WHERE schemaname='lab'")"
+printf '  foreign keys           %8s on monolith, %s on new db\n' \
+  "$(m "SELECT count(*) FROM pg_constraint WHERE contype='f'")" \
+  "$(p "SELECT count(*) FROM pg_constraint WHERE contype='f'")"
+printf '  replica identity       %8s (default: the primary key)\n' \
   "$(m "SELECT relreplident FROM pg_class WHERE oid='lab.payments'::regclass")"
 
 wait "$LOAD"

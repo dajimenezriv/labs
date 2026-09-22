@@ -171,7 +171,7 @@ func load(args []string) {
 
 func readBack(ctx context.Context, c *http.Client, base string, id int64) int {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/pay?id=%d", base, id), nil)
+		fmt.Sprintf("%s/pay?order_id=%d", base, id), nil)
 	if err != nil {
 		return -1
 	}

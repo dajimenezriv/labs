@@ -69,26 +69,42 @@ before it starts, so they can be run in any order and repeated.
 
 ## The setup
 
-The monolith owns the table that is leaving:
+The monolith owns two tables, joined by a foreign key and written by one
+transaction:
 
 ```sql
-lab.payments  200 000 rows   id, order_id, amount_cents, provider_ref, created_at
+lab.orders    200 000 rows   id, created_at
+lab.payments  200 000 rows   id, order_id -> lab.orders(id), created_at
 ```
 
-Everything that has to be decoupled in the application first — the joins, the
-foreign key, the transaction that spanned this table and another — is taken
-as already done, by the outbox. A payment is a single-row insert. What is
-left is the part no amount of application work avoids: moving a table that is
-being written to out of one database and into another, without dropping a
-write.
+**Both of them move, together.** That is the decision the rest of the lab
+follows from, and it is worth being explicit about why: a foreign key cannot
+span two databases, and neither can a transaction. Move one table and you
+lose both — the constraint has to be dropped and the single commit becomes
+two commits with a gap in the middle. Move the pair and you keep them, and
+the application does not change at all.
+
+So the unit of migration is not a table, it is a **consistency group**: the
+set of tables that are written together or referenced together. Which tables
+are in the group is not a preference, it is read off the transaction
+boundaries and the foreign key graph.
+
+```go
+tx.QueryRow(`INSERT INTO lab.orders DEFAULT VALUES RETURNING id`)
+tx.Exec(`INSERT INTO lab.payments (order_id) VALUES ($1)`, orderID)
+tx.Commit()
+```
+
+One commit before the cutover, one commit after it, both tables in whichever
+database currently owns them.
 
 The service (`go run . serve`) is an HTTP API with two connection pools and a
 routing switch that can be moved while it is running, which is the only
 honest way to do this: the migration has to happen to a service that is
-already up. The workload (`go run . load`) pays 400 orders a second, and
-after each write it immediately reads that write back through the same API.
-Every order is paid exactly once, so an id it was given a 2xx for and that is
-not in the database afterwards is a write the service acknowledged and lost.
+already up. The workload (`go run . load`) places 400 orders a second and,
+after each one, immediately reads it back through the same API. Every write
+returns the order id it created, so an id it was given a 2xx for and that has
+no payment behind it afterwards is a write the service acknowledged and lost.
 
 The only non-default Postgres setting is `wal_level = logical` on both, and
 it is the one that has to be decided months in advance. It ships as
@@ -107,15 +123,28 @@ you need it for has already happened.
 ./backfill.sh
 ```
 
-`CREATE PUBLICATION` on the monolith, `CREATE SUBSCRIPTION` on the new
-database, and 200 000 rows move while the table is being written to:
+`CREATE PUBLICATION ... FOR TABLE lab.orders, lab.payments` on the monolith,
+`CREATE SUBSCRIPTION` on the new database, and 400 000 rows across both
+tables move while both are being written to:
 
 ```
-  rows before copy       201617
-  rows after copy        202022
-  written during copy    405   <- none of them blocked
-  initial COPY           945 ms
+  rows before copy       402384
+  rows after copy        403056
+  written during copy    672   <- none of them blocked
+  initial COPY           778 ms
 ```
+
+One publication covering both tables is not a convenience, it is the reason
+the copy is safe. Logical replication preserves transaction boundaries across
+every table in a publication: a commit that inserted an order and its payment
+is applied on the subscriber as one transaction. Split the two across
+separate subscriptions and there is a window in which the new database has
+the payment and not the order — the exact tear the single commit exists to
+prevent.
+
+Each table syncs with its own worker, so `pg_subscription_rel` has a row per
+table and the subscription is only following the publisher once every one of
+them reports `r`.
 
 Nothing was locked, nothing queued, and no write was lost between the
 snapshot and the stream. That handoff is the whole reason to use logical
@@ -128,11 +157,11 @@ Then it follows. Three different answers to "how far behind is it":
 
 ```
         rows         bytes          time
-          29         29472  00:00:00.000215
-          24         44280  00:00:00.000245
-          26          8216  00:00:00.000346
-          21          4200  00:00:00.000271
-          27         23392  00:00:00.000134
+          56         37248  00:00:00.019795
+          56         46032  00:00:00.000152
+          54         10776  00:00:00.000229
+          54         13672  00:00:00.000289
+          60         21784  00:00:00.000318
 ```
 
 They do not agree, and the disagreement is the useful part:
@@ -140,8 +169,9 @@ They do not agree, and the disagreement is the useful part:
 - **time** is `pg_stat_replication.replay_lag`, computed by Postgres on the
   publisher. 200 microseconds. Replication is not the bottleneck in this
   migration and will not be the reason anything goes wrong.
-- **rows** is two `count(*)`s against two databases, and at 400 writes/s the
-  ~60 ms between them is worth ~25 rows on its own. It cannot resolve a lag
+- **rows** is two `count(*)`s against two databases, and at 400 writes/s —
+  two rows per write, one per table — the ~60 ms between them is worth ~50
+  rows on its own. It cannot resolve a lag
   this small; what it is measuring here is mostly itself.
 - **bytes** is WAL the publisher has produced and the subscriber has not
   confirmed, and it never reaches zero under load — the subscriber only
@@ -152,31 +182,56 @@ They do not agree, and the disagreement is the useful part:
 ### What does not come across
 
 ```
-  sequence on monolith   204313
-  sequence on new db     1   <- every insert here collides
-  replica identity       d (default: the primary key)
+  orders_id_seq            204057 on monolith, 1 on new db
+  payments_id_seq          204096 on monolith, 1 on new db
+  indexes                       3 on monolith, 2 on new db
+  foreign keys                  1 on monolith, 0 on new db
+  replica identity              d (default: the primary key)
 ```
 
 Logical replication copies rows. Not tables, not indexes, not constraints,
 not sequences, and no DDL from that point on:
 
-- **The table** has to exist on the subscriber before the subscription can
-  copy a single row, with matching column names and types. Nothing creates it
-  for you, and a column type that does not match is found at apply time.
-- **The indexes** are written by hand too. There is only a primary key here,
-  which the table definition brings with it, but a secondary index that
-  exists on the monolith and not on the subscriber turns every read in the
-  new service into a sequential scan — and it only becomes visible when
-  reads cut over.
-- **The sequence** is the one that ends the outage debate. 200 000 rows
-  arrived carrying ids up to 204 520, and `payments_id_seq` on the new
-  database is still at **1**. It is not broken, and nothing will report it as
-  a problem, because nothing is inserting there yet. It becomes a problem in
-  the first millisecond after the flip.
-- **DDL** is not replicated at all. A migration that adds a column to
-  `lab.payments` between the backfill and the cutover breaks the subscription
-  and it stays broken until someone applies the same DDL on the subscriber by
-  hand. The freeze on schema changes starts at `CREATE SUBSCRIPTION`.
+- **The tables** have to exist on the subscriber before the subscription can
+  copy a single row, with matching column names and types. Nothing creates
+  them for you, and a column type that does not match is found at apply time.
+- **The sequences** — plural now, and that is the point. Two tables mean two
+  ways to cause the same outage, and a group of a dozen tables means twelve,
+  every one of them to be advanced inside the freeze while a clock runs. This
+  is the argument for migrating groups rather than the whole schema at once.
+- **The foreign key** is not recreated. Here that is recoverable, because
+  both ends of it came across and the constraint can simply be added on the
+  new database. Had only `payments` moved, there would have been nothing to
+  add it to.
+- **DDL** is not replicated at all. A migration that adds a column between
+  the backfill and the cutover breaks the subscription, and it stays broken
+  until someone applies the same DDL on the subscriber by hand. The freeze on
+  schema changes starts at `CREATE SUBSCRIPTION`.
+
+The index is the one with a number attached, because it is measurable before
+anything has gone wrong. This is `GET /pay`'s own query — not a benchmark,
+the actual read path — run against both databases:
+
+```
+  read path, monolith        0.145 ms   Index Only Scan
+  read path, new db         14.460 ms   Seq Scan   <- if reads cut over now
+  read path, new db          0.177 ms   Bitmap Heap Scan   <- after finishing the schema
+  index + FK took         241 ms   (the FK validates every row)
+```
+
+**A 100x regression, waiting to be switched on.** Every check that runs before
+a read cutover passes: the row counts match, the data is identical, the
+replication lag is microseconds. The only thing wrong is that nobody created
+an index, and nothing anywhere reports a missing index as a problem — it is
+not an error, it is a plan.
+
+Finishing the schema belongs in the backfill rather than the cutover, and
+the 241 ms is why. Adding a foreign key validates every existing row, so it
+is a full table scan whose cost scales with the table — 241 ms here on
+200 000 rows with a warm cache, and measured at 1262 ms on a run where it
+contended with the apply worker. Neither number is large; both are large
+enough that they have no business being inside a freeze, and on a table a
+hundred times this size neither would be survivable there.
 
 ## 2. Shadow reads
 
@@ -184,20 +239,21 @@ Reads keep being served by the monolith. The new database is queried
 alongside, purely so the answers can be compared:
 
 ```
-  writes acknowledged    4012
-  shadow mismatches      6
-  replay lag             00:00:00.000183
+  writes acknowledged    4014
+  shadow mismatches      3
+  replay lag             00:00:00.00019
 ```
 
-Six, out of four thousand reads, and every one of them a client reading back
+Three, out of four thousand reads, and every one of them a client reading back
 a write from a few hundred microseconds ago. Runs vary between zero and a
 handful. That is the finding, not a disappointment: replication lag is not
 what makes cutting reads over risky here, and the only way to learn that
 without learning it in production is to have measured it.
 
 What does make it risky is everything in the list above that the comparison
-cannot see: an index that was not created, a column type that does not match,
-a sequence that was never advanced. A shadow read compares answers, and two
+cannot see. The shadow read compares *answers*, and both databases answer
+`1` — one in 0.146 ms off an index, the other in 14.332 ms off a sequential
+scan. Correctness is identical and the service would fall over. A shadow read compares answers, and two
 databases can agree on every answer and still not be interchangeable.
 
 ## 3. The cutover
@@ -210,31 +266,31 @@ Five statements, and their order is the whole difference between a held
 request and an outage.
 
 ```
-  quiesce in-flight         20 ms
-  drain to caught up       149 ms
-  drop subscription         86 ms
-  advance sequence          51 ms
-  reverse replication      159 ms
-  flip routing              15 ms
+  quiesce in-flight         15 ms
+  drain to caught up       147 ms
+  drop subscription         87 ms
+  advance sequence          66 ms
+  reverse replication      142 ms
+  flip routing              17 ms
   ------------------------------
-  writes held for          571 ms
-  WAL still unconfirmed   7968 bytes at the moment rows agreed
+  writes held for          548 ms
+  WAL still unconfirmed  35456 bytes at the moment rows agreed
 ```
 
 ```
 t	ok/s	err/s	rawmiss/s	p99ms
-12	401	0	0	4
-13	399	0	0	4
+12	400	0	0	3
+13	399	0	0	3
 14*	401	0	0	3
-15	187	0	0	577
-16	399	0	0	6
+15	200	0	0	541
+16	401	0	0	3
 
-acknowledged        27779
+acknowledged        27799
 errors              0
 read-after-write    0 misses
-p50 / p99 / max     3 / 4 / 583 ms
+p50 / p99 / max     3 / 3 / 551 ms
 
-  acknowledged writes    27779
+  acknowledged writes    27799
   absent from new db     0
 ```
 
@@ -242,9 +298,19 @@ Half a second of requests taking half a second, and nothing else. No errors,
 no lost writes, no client that failed to read back what it had just written.
 That is what "without downtime" is allowed to mean, and it is a claim about
 the client's timeout, not about the database: the writes were **held, not
-rejected**. A request that waits 571 ms is slow. A request that gets a 503 is
+rejected**. A request that waits 548 ms is slow. A request that gets a 503 is
 downtime. The loader's client timeout is 3 s, and the entire runbook fits
 inside it with room to spare.
+
+There is a step before the freeze that does not appear in the timings,
+because it happens while writes are still flowing and therefore costs
+nobody anything: **wait until the subscriber is nearly caught up, and only
+then freeze.** A freeze lasts as long as whatever is still queued, so
+freezing into a backlog makes the outage the size of the backlog. Skipping
+this turned a 506 ms cutover into a **3721 ms** one in `rollback.sh` —
+past the workload's 3 s client timeout, and 16 writes failed that had no
+business failing. The backlog was the apply worker stalled behind the
+foreign key validation from §1.
 
 The quiesce is one `sync.RWMutex`. Writers hold it for reading for the
 duration of their write; the freeze takes it for writing, which blocks new
@@ -256,27 +322,28 @@ anything at all.
 
 
 Then the drain, and the trap that the last line of the output is about. When
-the two row counts agreed there were still **8 KB of WAL unconfirmed** on
+the two row counts agreed there were still **35 KB of WAL unconfirmed** on
 the publisher. The data was all there; the acknowledgement was not, and it
 would not have been for up to ten seconds. Gating the freeze on LSNs turns a
-571 ms cutover into a ten-second one, and the ten seconds are entirely the
+548 ms cutover into a ten-second one, and the ten seconds are entirely the
 feedback interval.
 
 The order of the remaining four is not arbitrary:
 
 1. **Drop the forward subscription** before the new database generates a
    single id of its own, or two writers are inserting into one table.
-2. **`setval` the sequence** — §1's stranded `1`, moved past the highest id
-   that arrived, plus a margin. It has to be after the drain, because the
-   drain is what decides what the highest id is. Skip it and every insert
-   asks for an id, gets 1, 2, 3, and claims a primary key that arrived in the
+2. **`setval` every sequence** — §1's stranded `1`s, moved past the highest
+   id that arrived, plus a margin. Both of them, and in a real group all
+   twelve. It has to be after the drain, because the drain is what decides
+   what the highest id is. Skip one and every insert against that table asks
+   for an id, gets 1, 2, 3, and claims a primary key that arrived in the
    COPY; there are 200 000 collisions to climb through before the first write
    succeeds.
 3. **Create the reverse subscription** with `copy_data = false`, now, inside
    the freeze. It carries everything written from this moment on and nothing
    before it, so the only way it covers the whole post-cutover window is to
-   exist before the window opens. This is the 159 ms that buys §4.
-4. **Flip the routing**, 15 ms, the only step anyone remembers.
+   exist before the window opens. This is the 142 ms that buys §4.
+4. **Flip the routing**, 17 ms, the only step anyone remembers.
 
 A last note on what the freeze is worth. It binds writers that go through
 this service, and in the lab that is all of them. In production it is not:
@@ -300,10 +367,10 @@ the day it is needed. Twenty seconds of live traffic on the new database, and
 then back:
 
 ```
-  drain reverse stream     144 ms
-  writes held for          672 ms
+  drain reverse stream     178 ms
+  writes held for          615 ms
 
-acknowledged        27543
+acknowledged        27580
 errors              0
 absent from monolith   0
 ```
@@ -312,21 +379,22 @@ Same shape as the cutover, because it is the same procedure with the arrows
 turned around. What is new is what those twenty seconds did to the monolith:
 
 ```
-  max(id) in its table   210629
-  its sequence           201569
-  inserts that would     9060   <- every one a duplicate key
+  max(id) in its table   210722
+  its sequence           201670
+  inserts that would     9052   <- every one a duplicate key
 ```
 
-9 599 rows arrived in the monolith through the reverse subscription, carrying
+9 700 rows arrived in the monolith through the reverse subscription, carrying
 ids the _new_ database generated. An arriving row does not advance the
 sequence that would have produced it, so the monolith's sequence is now
-stranded 9 060 behind its own table. Nothing is wrong while the monolith is
+stranded 9 052 behind its own table. Both sequences are, in fact — this is
+the `orders` one, and `payments` has the same gap. Nothing is wrong while the monolith is
 not inserting. It becomes wrong the instant it is asked to again — which is
 precisely what rolling back means, and it is §3's outage waiting at the end
 of the recovery path.
 
-So the rollback runbook is the cutover runbook, including the `setval`, in
-the other direction. A rollback plan that is not itself a tested runbook is
+So the rollback runbook is the cutover runbook, including a `setval` for
+every sequence in the group, in the other direction. A rollback plan that is not itself a tested runbook is
 two outages, not one.
 
 ## What this costs you
@@ -339,14 +407,24 @@ two outages, not one.
 - **The copy is the part that works.** 200 000 rows, 945 ms, nothing blocked,
   nothing lost. Every hour spent worrying about the copy is an hour not spent
   on the list of things it does not copy.
-- **The sequence is the outage.** It is the one item on that list that fails
-  every write, immediately, and it is invisible in every check performed
-  before the flip: the copy is complete, the row counts match, the shadow
-  reads agree, the lag is microseconds. It also fails in both directions —
-  forward at the cutover, backward at the rollback, where §4 measures the gap
-  at 9 060.
+- **The sequences are the outage**, one per table in the group. They fail
+  every write immediately, they are invisible in every check performed before
+  the flip — the copy is complete, the row counts match, the shadow reads
+  agree, the lag is microseconds — and they fail in both directions, forward
+  at the cutover and backward at the rollback, where §4 measures the gap at
+  9 052. Twelve tables is twelve chances to miss one inside a freeze.
+- **The unit of migration is a consistency group, not a table.** Transaction
+  boundaries and the foreign key graph decide what travels together, and
+  neither is negotiable: a constraint cannot span two databases and neither
+  can a commit. Move a group and the application does not change. Move half
+  of one and you have traded a foreign key and a transaction for a reconciler
+  you now have to write, run and watch forever.
+- **Do not freeze into a backlog.** The freeze lasts as long as whatever the
+  subscriber still has to apply. Waiting for it to catch up *before* freezing
+  costs nothing because writes are still flowing; skipping that wait turned
+  506 ms into 3721 ms and broke the client timeout.
 - **Held is not rejected, and the client's timeout is the spec.** "Zero
-  downtime" here means 571 ms of elevated latency inside a 3 s timeout. Pin
+  downtime" here means 548 ms of elevated latency inside a 3 s timeout. Pin
   the budget to the tightest caller timeout you have, then make the runbook
   fit inside it, and if it does not fit, the cutover needs to be shorter
   rather than the claim looser.
@@ -360,7 +438,7 @@ two outages, not one.
   The check that catches it is the one §3 ends on: every id that got a 2xx,
   looked up in the database that now owns it.
 - **Reversibility is a decision made before the flip, not after.** The
-  reverse subscription costs 159 ms inside the freeze and cannot be created
+  reverse subscription costs 142 ms inside the freeze and cannot be created
   retroactively, because `copy_data = false` means it only carries what comes
   after it.
 
@@ -385,5 +463,5 @@ two outages, not one.
   have to exist at once, `CREATE SUBSCRIPTION ... WITH (origin = none)` is
   what stops a row applied from a subscription being published back.
 - The per-step timings are measured around `psql` invocations from bash, so
-  each carries about 20-30 ms of process startup. The 571 ms is an honest
+  each carries about 20-30 ms of process startup. The 548 ms is an honest
   upper bound on the real cutover, not a floor.

@@ -95,26 +95,49 @@ func (a *app) handlePay(w http.ResponseWriter, r *http.Request) {
 	if writes, _ := a.route(); writes != monolith {
 		pool = a.pay
 	}
-	var id int64
-	err := pool.QueryRow(r.Context(),
-		`INSERT INTO lab.payments DEFAULT VALUES RETURNING id`).Scan(&id)
+
+	// Two tables, one commit, and it stays one commit on both sides of the
+	// cutover because both tables move together. This is the whole argument
+	// for migrating a consistency group rather than a table: split these
+	// two across databases and this function needs a distributed
+	// transaction, an outbox, or an apology.
+	orderID, err := insertOrder(r.Context(), pool)
 	if err != nil {
 		a.failed.Add(1)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	a.ok.Add(1)
-	fmt.Fprint(w, id)
+	fmt.Fprint(w, orderID)
+}
+
+func insertOrder(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	var orderID int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO lab.orders DEFAULT VALUES RETURNING id`).Scan(&orderID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO lab.payments (order_id) VALUES ($1)`, orderID); err != nil {
+		return 0, err
+	}
+	return orderID, tx.Commit(ctx)
 }
 
 func (a *app) handleRead(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	orderID, _ := strconv.ParseInt(r.URL.Query().Get("order_id"), 10, 64)
 	_, reads := a.route()
 
 	count := func(p *pgxpool.Pool) (int, error) {
 		var n int
 		err := p.QueryRow(r.Context(),
-			`SELECT count(*) FROM lab.payments WHERE id = $1`, id).Scan(&n)
+			`SELECT count(*) FROM lab.payments WHERE order_id = $1`, orderID).Scan(&n)
 		return n, err
 	}
 
