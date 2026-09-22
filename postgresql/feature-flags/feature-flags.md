@@ -10,19 +10,6 @@ docker compose up
 psql postgres://postgres:postgres@localhost:5555/db -f seed.sql
 ```
 
-200 flags, a monotonic `version` per change, and a trigger that announces
-every change on a channel:
-
-```sql
-CREATE FUNCTION lab.flag_changed() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  NEW.version := nextval('lab.flags_version');
-  NEW.updated_at := clock_timestamp();
-  PERFORM pg_notify('flags', NEW.key);
-  RETURN NEW;
-END $$;
-```
-
 ### The payload is a key, not a flag
 
 Two options:
@@ -50,20 +37,43 @@ makes a listener correct.
 from issuing the `UPDATE` to the flag being live in an instance's map;
 `queries` and `notifs` are totals across all 20.
 
-TABLE_1_HERE
+| mode   | every |   p50ms |    p99ms |   maxms | queries | notifs |
+| ------ | ----: | ------: | -------: | ------: | ------: | -----: |
+| poll   |   15s |  7832.7 |  15002.9 | 15003.3 |      60 |      0 |
+| poll   |    5s |  2861.0 |   4984.5 |  4987.7 |     140 |      0 |
+| poll   |    1s |   852.9 |    982.5 |   983.5 |     620 |      0 |
+| listen |     - | **9.3** | **10.8** |    12.0 |     620 |    600 |
+| resync |   10s |     9.2 |     12.8 |    13.1 |     680 |    600 |
 
 Polling's p99 is the interval and its p50 is half of it, which is arithmetic
 rather than a finding. The finding is the standing cost, with nothing
 happening at all:
 
-TABLE_2_HERE
+| mode                  | every | queries in 30s | backends |
+| --------------------- | ----: | -------------: | -------: |
+| baseline (stack idle) |     - |              - |        1 |
+| poll                  |    1s |            640 |        9 |
+| poll                  |    5s |            140 |        9 |
+| listen                |     - |             20 |       22 |
+| resync                |   10s |             80 |       29 |
 
 That is the trade in two numbers. Sub-second propagation by polling costs
-QPS_1S queries per 30 seconds, forever, to be told nothing changed. Listening
-costs zero queries at rest and lands in single-digit milliseconds — and costs
-LISTEN_BACKENDS backends instead of POLL_BACKENDS, because `LISTEN` is session
-state. It cannot come from the pool. One parked connection per instance, not
-shared, not returnable, counted against `max_connections` all day.
+640 queries per 30 seconds, forever, to be told nothing changed. Listening
+costs 20 — one snapshot per instance at startup and nothing after — and lands
+in single-digit milliseconds.
+
+The `backends` column is where it charges you instead. Polling's 20 instances
+share 8 pooled connections; listening needs **22 backends for the same 20
+instances**, because `LISTEN` is session state and cannot come from a pool.
+One parked connection per instance, not shared, not returnable, counted
+against `max_connections` all day — and the one connection in the service
+that cannot sit behind a transaction-mode pooler, for the reasons in
+[connection-pooling.md](../connection-pooling/connection-pooling.md). At 100
+instances that is a capacity decision, not a detail.
+
+`resync` costs 29 because its watchdogs run on the shared pool, which is the
+point of running them there: 20 dedicated listener sessions plus a pool that
+still behaves like a pool.
 
 ## 2. The listener that stops listening
 
@@ -97,9 +107,26 @@ indistinguishable from all four real causes. `stale` counts instances serving
 at least one flag at an older version than the committed one, one second
 after the last change; `stale+settle` is the same count 25 seconds later.
 
-TABLE_3_HERE
+| mode   | every |  p50ms |       p99ms | missed | drops |     stale | stale+settle |
+| ------ | ----: | -----: | ----------: | -----: | ----: | --------: | -----------: |
+| listen |     - |    9.2 | **16128.2** | **80** |   220 | **20/20** |    **20/20** |
+| resync |   10s |    9.1 |       508.2 |      0 |   220 |         0 |            0 |
+| poll   |    5s | 2860.7 |      4982.5 |      0 |     0 |         0 |            0 |
 
-STALE_PARA
+Every one of the 20 instances ends up serving a flag at the wrong value, and
+25 seconds later every one of them still is. Nothing errored. Each instance
+reconnected within half a second, resubscribed successfully, and sat there
+healthy and wrong — `pg_stat_activity` shows twenty connected listeners the
+whole time.
+
+Two columns are worth reading carefully. `missed` counts 80 flag changes that
+never reached an instance at all, and `p99` of 16 seconds is the changes that
+_did_ arrive, very late. Both come from the same mechanism: the only thing
+that can repair a missed notification is **another change to the same key**,
+because that is what triggers the next re-read of that row. A flag nobody
+touches again stays wrong forever, and one that happens to be flipped again
+16 seconds later gets silently repaired by the second flip. Neither outcome
+is something the instance can distinguish from working correctly.
 
 `poll` is in that table because it has nothing to lose. It holds no
 subscription and no position, so a dead connection costs it one interval.
@@ -118,7 +145,10 @@ and it is why the fix below is polling.
   the listening connection, because it has to work in precisely the situation
   where that connection is the broken thing.
 
-RESYNC_PARA
+That second one is what fixes the table above, and its cost is visible in the
+`p99` column: 508 ms, which is the reconnect backoff. Changes that land while
+an instance is between connections are not lost, they are late by one
+backoff. Everything else still arrives in 9 ms.
 
 Notifications become the fast path and the slow poll becomes the correct one.
 Which is the same conclusion as the outbox in the Kafka lab from the other
@@ -132,8 +162,8 @@ be the only mechanism.
   an instance is wrong is to ask it what version it holds. Export that, and
   alert on the spread across instances — not on the listener being connected,
   which it will be.
-- **A backend per instance, unpoolable.** LISTEN_BACKENDS backends for 20
-  instances here. At a hundred instances that is a real fraction of
+- **A backend per instance, unpoolable.** 22 backends for 20 instances
+  here, against 9 for polling. At a hundred instances that is a real fraction of
   `max_connections`, and it is the one connection in the service that cannot
   go behind a transaction-mode pooler — see
   [connection-pooling.md](../connection-pooling/connection-pooling.md).
