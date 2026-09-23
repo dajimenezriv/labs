@@ -1,14 +1,17 @@
 # Reprocessing: concepts
 
-> **The numbers here are expected, not measured.** Each one is derived from the setup below (shown as arithmetic where it matters). Measured results are in [README.md](README.md).
-
 - [Replayable queue](#replayable-queue)
 - [The setup](#the-setup)
 - [1. Why a failed record is a problem at all](#1-why-a-failed-record-is-a-problem-at-all)
 - [2. Uber's retry topics](#2-ubers-retry-topics)
+	- [Expected results](#expected-results)
 - [3. The price: ordering](#3-the-price-ordering)
+	- [The fix lives in the sink](#the-fix-lives-in-the-sink)
+	- [Expected results](#expected-results-1)
 - [4. The DLQ and merging it back](#4-the-dlq-and-merging-it-back)
+	- [Expected results](#expected-results-2)
 - [5. Rewinding a consumer group](#5-rewinding-a-consumer-group)
+	- [Expected results](#expected-results-3)
 - [6. Retention is the replay window](#6-retention-is-the-replay-window)
 - [Interview answers](#interview-answers)
 
@@ -16,16 +19,16 @@ Based on Uber's [Building Reliable Reprocessing and Dead Letter Queues with Apac
 
 ## Replayable queue
 
-|                     | Classic queue (RabbitMQ, SQS) | Kafka                                         |
-| ------------------- | ----------------------------- | --------------------------------------------- |
-| Reading a message   | removes it (on ack)           | removes nothing                               |
-| Consumer position   | the broker tracks each message | one offset per partition, per group          |
-| What "done" means   | ack → deleted                 | commit → offset stored in `__consumer_offsets` |
-| When data disappears | on ack                        | on `retention.ms` (default 7 days)            |
-| Replay              | impossible unless you kept a copy | move the offset back                      |
+|                      | Classic queue (RabbitMQ, Amazon SQS) | Kafka                                          |
+| -------------------- | ------------------------------------ | ---------------------------------------------- |
+| Reading a message    | removes it (on ack)                  | removes nothing                                |
+| Consumer position    | the broker tracks each message       | one offset per partition, per group            |
+| What "done" means    | ack → deleted                        | commit → offset stored in `__consumer_offsets` |
+| When data disappears | on ack                               | on `retention.ms` (default 7 days)             |
+| Replay               | impossible unless you kept a copy    | move the offset back                           |
 
-- In a classic queue, the DLQ is the only survivor of a failure. In Kafka, the DLQ is just another topic, so it is replayable too: **a parking lot until the fix ships, not a graveyard**.
-- Two ways to replay: **rewind the group** (everything since a point in time, section 5) or **merge the DLQ** (only the failures, section 4).
+- In a classic queue, the DLQ is the only survivor of a failure. In Kafka, the DLQ is just another topic, so it is replayable too.
+- Two ways to replay: **rewind the group** (everything since a point in time) or **merge the DLQ** (only the failures).
 - Both are redelivery. Both need an idempotent consumer, and both are bounded by retention.
 
 ## The setup
@@ -40,11 +43,18 @@ Based on Uber's [Building Reliable Reprocessing and Dead Letter Queues with Apac
 
 ## 1. Why a failed record is a problem at all
 
-A partition is a line. The consumer can only commit "everything up to offset N", so one record that won't process blocks everything behind it: **head-of-line blocking**.
+One record that won't process blocks everything behind it: **head-of-line blocking**.
 
 The options, and why most don't work:
 
-**Don't commit and hope it comes back.** It won't. The fetch position has already moved past the record, so the next poll returns the records _after_ it. The failed record only comes back after a restart or rebalance, from the last committed offset, by which point you may have committed past it.
+**Don't commit and hope it comes back.** It won't, because a consumer keeps **two positions** per partition:
+
+|                      | where it lives               | what moves it                              | who reads it                                         |
+| -------------------- | ---------------------------- | ------------------------------------------ | ---------------------------------------------------- |
+| **fetch position**   | client memory                | every poll that returns records, or a seek | the next poll                                        |
+| **committed offset** | broker, `__consumer_offsets` | only a commit (manual or autocommit)       | only a newly assigned partition (startup, rebalance) |
+
+A poll always continues from the fetch position. The committed offset is never read while the consumer runs; it is a bookmark for whoever gets the partition next.
 
 **Retry in place.** It works, but everything behind the record waits, on every partition the poll loop owns:
 
@@ -76,8 +86,7 @@ readings ──fail──> readings.retry.1 ──> readings.retry.2 ──> rea
 ```
 
 - The consumer publishes the failed record to the next topic, then **commits the original**. The partition moves on.
-- Each tier is its own topic **and its own consumer group**, so a retry backlog never slows live traffic, and each tier rebalances separately.
-- Delays grow at each tier, so a downstream that blipped gets retried almost at once and one that is properly down isn't hammered while it recovers.
+- Each tier is its own topic **and its own consumer group**, so a retry backlog never slows live traffic.
 
 The routing decision:
 
@@ -96,7 +105,7 @@ producer.ProduceSync(ctx, &kgo.Record{
 ```
 
 - `ProduceSync` **before** the commit. The other order loses the record if the process dies in between.
-- `errNonRetryable` (a parse error, a bug) skips the ladder. Retrying a parse error three times just fails three more times, more slowly.
+- `errNonRetryable` (a parse error, a bug) skips the ladder.
 
 **Kafka has no delayed delivery**, so a tier's delay is the consumer sleeping until the record is due:
 
@@ -111,20 +120,20 @@ if c.delay > 0 {
 
 **Headers** are the big gain over retrying in place: the record carries its own history.
 
-| header                                                  | why                                                                   |
-| ------------------------------------------------------- | --------------------------------------------------------------------- |
-| `retry_count`                                           | which tier it's on, so where it goes next                             |
+| header                                                      | why                                                                     |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `retry_count`                                               | which tier it's on, so where it goes next                               |
 | `original_topic` / `original_partition` / `original_offset` | where it came in; by the DLQ, the topic it arrived from is a retry tier |
-| `first_failed_at`                                       | how long it has been stuck is a subtraction                           |
-| `error`                                                 | why it failed the last time                                           |
+| `first_failed_at`                                           | how long it has been stuck is a subtraction                             |
+| `error`                                                     | why it failed the last time                                             |
 
 ### Expected results
 
 | variant                  | delivered | dlq | drain | p50 first try | p50 retried |
 | ------------------------ | --------: | --: | ----: | ------------: | ----------: |
-| blocking, flaky          | 6000/6000 |   0 |  ~42s |          ~5s |          ~7s |
+| blocking, flaky          | 6000/6000 |   0 |  ~42s |           ~5s |         ~7s |
 | tiered, flaky            | 6000/6000 |   0 |  ~33s |         ~10ms |          3s |
-| blocking, flaky + poison |    ~3000 |   0 |     ∞ |          ~5s |          ~7s |
+| blocking, flaky + poison |     ~3000 |   0 |     ∞ |           ~5s |         ~7s |
 | tiered, flaky + poison   | 5999/6000 |   1 |  ~33s |         ~10ms |          3s |
 
 - **Blocking, flaky**: 12 × 3s = **36s of stall**, on top of 6000 × 1ms = 6s of work. That's ~42s of consumer time for 30s of traffic, so it falls behind and healthy records wait **seconds** behind someone else's retry.
@@ -132,11 +141,9 @@ if c.delay > 0 {
 - **Blocking, poison**: stuck at id 3000 forever. Lag grows without bound. Only a lag alert notices.
 - **Tiered, poison**: 1s → 2s → 4s = **7s** later, it's in the DLQ. Exactly **1 dead letter**; everything else is delivered.
 
-**Retry topics take the stall off healthy traffic.**
-
 ## 3. The price: ordering
 
-A retried record arrives seconds (in production, minutes) after the records behind it. Per-key order, which is the whole reason for choosing the partition key, is gone for anything that fails.
+A retried record arrives after the records behind it. Per-key order, which is the whole reason for choosing the partition key, is gone for anything that fails.
 
 Two different measures of the damage:
 
@@ -183,11 +190,11 @@ ON CONFLICT (key) DO UPDATE
 
 Nothing consumes the DLQ. Someone has to, or it's a leak with a topic name. Three operations:
 
-| command     | what it does                                                  |
-| ----------- | ------------------------------------------------------------- |
-| `dlq list`  | read everything, no consumer group, so it doesn't consume     |
-| `dlq merge` | republish everything onto `readings.retry.1`                  |
-| `dlq purge` | `DeleteRecords` up to the current end offsets                 |
+| command     | what it does                                              |
+| ----------- | --------------------------------------------------------- |
+| `dlq list`  | read everything, no consumer group, so it doesn't consume |
+| `dlq merge` | republish everything onto `readings.retry.1`              |
+| `dlq purge` | `DeleteRecords` up to the current end offsets             |
 
 Merge goes to **retry.1, not the live topic** (Uber's choice): records that already failed don't compete with live traffic, and if they fail again they walk the ladder and come back to the DLQ instead of looping.
 
@@ -275,7 +282,7 @@ Classify the error. Retryable errors go to a retry topic with a growing delay (1
 Ordering. A retried record arrives after newer events of its key. I'd fix that in the sink with a version guard (`WHERE stored.seq < incoming.seq`), and only if the events are state, not changes. If order truly matters, you have to block and accept the stall.
 
 **"Why not just not commit?"**
-The fetch position already moved on. The record only returns after a restart or rebalance, and blocking inside the poll loop in Java eventually trips `max.poll.interval.ms` and triggers a rebalance.
+A consumer has two positions: the fetch position (in memory, moves on every poll) and the committed offset (on the broker, only read on assignment). Not committing doesn't move the fetch position back, so the record only returns after a restart or rebalance. Seeking back works, but it still blocks the partition, and blocking inside the poll loop in Java eventually trips `max.poll.interval.ms` and triggers a rebalance.
 
 **"What do you do with the DLQ?"**
 Alert on anything landing there. After the fix: merge it back into the first retry tier (not the live topic), check, then purge. Merge doesn't consume, so merging twice duplicates.
