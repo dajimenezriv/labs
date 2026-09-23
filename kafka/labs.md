@@ -14,5 +14,4 @@ This covers partition key design, why consumers can't exceed partition count, an
 
 Do them in that order. Each one gives you a war story with a metric attached, which is what makes the answer sound like experience rather than reading.
 
-3. Create the Uber queue system.
-4. Replayable queue.
+3. Create the Uber queue system and replayable DLQ.

@@ -1,0 +1,46 @@
+name: reprocessing
+
+services:
+  kafka:
+    image: apache/kafka:4.1.0
+    environment:
+      CLUSTER_ID: reprocessing-lab
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      # "kafka" for the CLI tools run inside the container, "localhost" for
+      # the lab binary on the host.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # A single broker cannot hold three copies of the internal topics.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      # Every run starts fresh consumer groups; 3s of stock delay before each
+      # first assignment is dead time.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      # Section 4 only. Stock is 5 minutes between retention sweeps; the
+      # sweep interval is how late a deletion can be, so it is scaled down
+      # alongside the topic's retention.ms.
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "5000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+volumes:
+  kafka-data:
