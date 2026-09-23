@@ -9,6 +9,8 @@
 - [What this costs you](#what-this-costs-you)
 - [Notes](#notes)
 
+Should we add the `EXCLUSIVE_LOCK` thing?
+
 `wal_level` determines how much information is written to the WAL. Default is `replica`, which supports archiving and replication. `minimal` writtes just the information to recover from a crash or immediate shutdown. `logical` supports logical decoding.
 
 1. Decouple in code first:
