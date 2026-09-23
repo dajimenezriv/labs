@@ -20,112 +20,63 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-func cmdDLQ(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: dlq list|merge|purge")
-	}
-	ctx := context.Background()
-	switch args[0] {
+func cmdDLQ(op string) {
+	switch op {
 	case "list":
-		return dlqList(ctx)
+		dlqList()
 	case "merge":
-		return dlqMerge(ctx)
+		dlqMerge()
 	case "purge":
-		return dlqPurge(ctx)
+		dlqPurge()
 	}
-	return fmt.Errorf("usage: dlq list|merge|purge")
 }
 
-func dlqList(ctx context.Context) error {
-	records, err := drain(ctx, dlqTopic)
-	if err != nil {
-		return err
-	}
+func dlqList() {
+	records := drain(dlqTopic)
 	for _, r := range records {
-		headers := slices.Clone(r.Headers)
-		// Written in map order, so left alone the fields land in a different
-		// order on every record.
-		slices.SortFunc(headers, func(a, b kgo.RecordHeader) int { return strings.Compare(a.Key, b.Key) })
 		fields := []string{fmt.Sprintf("%d/%d key=%s value=%s", r.Partition, r.Offset, r.Key, r.Value)}
-		for _, h := range headers {
+		for _, h := range r.Headers {
 			fields = append(fields, fmt.Sprintf("%s=%s", h.Key, h.Value))
 		}
+		// Header order is map order; sort so every record reads the same way.
+		slices.Sort(fields[1:])
 		fmt.Println(strings.Join(fields, " "))
 	}
 	fmt.Printf("%d record(s) in %s\n", len(records), dlqTopic)
-	return nil
 }
 
-func dlqMerge(ctx context.Context) error {
-	records, err := drain(ctx, dlqTopic)
-	if err != nil {
-		return err
-	}
-	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	destination := retryTopic(1)
+func dlqMerge() {
+	records := drain(dlqTopic)
+	producer := client()
 	for _, r := range records {
 		// Back to the front of the ladder: the retry count is dropped so a
 		// merged record gets every tier again rather than one attempt at the
 		// tier it died on. The origin headers stay.
-		headers := make([]kgo.RecordHeader, 0, len(r.Headers))
-		for _, h := range r.Headers {
-			if h.Key != retryCountHeader && h.Key != errorHeader {
-				headers = append(headers, h)
-			}
-		}
-		if err := client.ProduceSync(ctx, &kgo.Record{
-			Topic: destination, Key: r.Key, Value: r.Value, Headers: headers,
-		}).FirstErr(); err != nil {
-			return fmt.Errorf("republish offset %d: %w", r.Offset, err)
-		}
+		headers := slices.DeleteFunc(r.Headers, func(h kgo.RecordHeader) bool {
+			return h.Key == retryCountHeader || h.Key == errorHeader
+		})
+		producer.ProduceSync(context.Background(), &kgo.Record{
+			Topic: retryTopic(1), Key: r.Key, Value: r.Value, Headers: headers,
+		})
 	}
-	fmt.Printf("merged %d record(s) into %s; they are still in %s\n", len(records), destination, dlqTopic)
-	return nil
+	fmt.Printf("merged %d record(s) into %s; they are still in %s\n", len(records), retryTopic(1), dlqTopic)
 }
 
-// dlqPurge deletes everything before the current end of each partition.
-// Records arriving during the call are past that line and survive: purge
-// clears what you looked at, not what came in while you were deciding.
-func dlqPurge(ctx context.Context) error {
-	adm, closeFn, err := admin()
-	if err != nil {
-		return err
-	}
-	defer closeFn()
-
-	ends, err := adm.ListEndOffsets(ctx, dlqTopic)
-	if err == nil {
-		err = ends.Error()
-	}
-	if err != nil {
-		return err
-	}
-	responses, err := adm.DeleteRecords(ctx, ends.Offsets())
-	if err != nil {
-		return err
-	}
-	var failed error
-	responses.Each(func(r kadm.DeleteRecordsResponse) {
-		if r.Err != nil && failed == nil {
-			failed = fmt.Errorf("partition %d: %w", r.Partition, r.Err)
-		}
-	})
-	if failed != nil {
-		return failed
-	}
+// dlqPurge deletes everything before the current end of each partition, which
+// moves the log start offset. Records arriving during the call are past that
+// line and survive: purge clears what you looked at, not what came in while
+// you were deciding.
+func dlqPurge() {
+	ctx := context.Background()
+	adm := admin()
+	ends, _ := adm.ListEndOffsets(ctx, dlqTopic)
+	adm.DeleteRecords(ctx, ends.Offsets())
 	fmt.Printf("purged %s\n", dlqTopic)
-	return nil
 }
 
 // drain reads everything currently in a topic without a consumer group, so
@@ -135,53 +86,22 @@ func dlqPurge(ctx context.Context) error {
 // blocks waiting for the next record, so without knowing where the end is
 // there is no telling "drained" from "quiet". The start offsets matter too:
 // after a purge the log starts later than zero.
-func drain(ctx context.Context, topic string) ([]*kgo.Record, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	client, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers...),
-		kgo.ConsumeTopics(topic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer client.Close()
-	adm := kadm.NewClient(client)
-
-	starts, err := adm.ListStartOffsets(ctx, topic)
-	if err == nil {
-		err = starts.Error()
-	}
-	if err != nil {
-		return nil, err
-	}
-	ends, err := adm.ListEndOffsets(ctx, topic)
-	if err == nil {
-		err = ends.Error()
-	}
-	if err != nil {
-		return nil, err
-	}
-
+func drain(topic string) []*kgo.Record {
+	ctx := context.Background()
+	adm := admin()
+	starts, _ := adm.ListStartOffsets(ctx, topic)
+	ends, _ := adm.ListEndOffsets(ctx, topic)
 	pending := 0
 	ends.Each(func(end kadm.ListedOffset) {
-		if start, ok := starts.Lookup(end.Topic, end.Partition); ok {
-			pending += int(end.Offset - start.Offset)
-		}
+		start, _ := starts.Lookup(end.Topic, end.Partition)
+		pending += int(end.Offset - start.Offset)
 	})
 
-	records := make([]*kgo.Record, 0, pending)
+	cl := client(kgo.ConsumeTopics(topic), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	defer cl.Close()
+	var records []*kgo.Record
 	for len(records) < pending {
-		fetches := client.PollFetches(ctx)
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("read %s: %w", topic, err)
-		}
-		if err := fetches.Err(); err != nil {
-			return nil, fmt.Errorf("read %s: %w", topic, err)
-		}
-		fetches.EachRecord(func(r *kgo.Record) { records = append(records, r) })
+		records = append(records, cl.PollFetches(ctx).Records()...)
 	}
-	return records, nil
+	return records
 }

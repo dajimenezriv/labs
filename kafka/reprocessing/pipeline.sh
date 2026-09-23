@@ -5,7 +5,6 @@
 # keys; every 500th fails twice before it works.
 
 set -euo pipefail
-cd "$(dirname "$0")"
 source lib.sh
 
 readonly N=6000 RATE=200 KEYS=30

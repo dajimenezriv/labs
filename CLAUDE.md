@@ -41,5 +41,6 @@ This is the main rule. A lab contains only what the situation needs.
 ## Code conventions
 
 - Go: check `go.mod` for the version and use the newest stdlib affordances (`wg.Go`, etc.).
+- Go errors: skip `if err != nil` for errors the lab isn't about (setup, marshalling, closing, etc.) and discard them with `_`. Only check the errors the writeup explains or the measurement counts. The labs are not about learning Go, so the code should show only what matters to the situation. Exception: the `golang` lab, where error handling is part of the point.
 - Bash scripts start with `set -euo pipefail` and `cd "$(dirname "$0")"`. Shared helpers for a lab go in its `lib.sh`.
 - Build binaries into a temp dir or gitignore them, along with any `out/` directory.

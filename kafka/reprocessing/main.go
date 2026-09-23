@@ -4,8 +4,7 @@
 //
 //	topics   recreate readings, its retry tiers and its DLQ
 //	produce  send ids 1..N at a fixed rate, spread over K keys
-//	consume  run the blocking consumer or the tiered pipeline against a
-//	         handler with injected failures, until it goes quiet
+//	consume  run the blocking consumer or the tiered pipeline until it goes quiet
 //	verify   score a sink file
 //	dlq      list | merge | purge the dead letter queue
 //	offsets  print the live topic's log start and end offsets
@@ -34,61 +33,42 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-var brokers = []string{"localhost:29092"}
-
 const partitions = 3
 
 func main() {
-	if len(os.Args) < 2 {
-		die(errors.New("usage: reprocessing {topics|produce|consume|verify|dlq|offsets} [flags]"))
-	}
-	cmds := map[string]func([]string) error{
-		"topics":  cmdTopics,
-		"produce": cmdProduce,
-		"consume": cmdConsume,
-		"verify":  cmdVerify,
-		"dlq":     cmdDLQ,
-		"offsets": cmdOffsets,
-	}
-	run, ok := cmds[os.Args[1]]
-	if !ok {
-		die(fmt.Errorf("unknown command %q", os.Args[1]))
-	}
-	if err := run(os.Args[2:]); err != nil {
-		die(err)
+	args := os.Args[2:]
+	switch os.Args[1] {
+	case "topics":
+		cmdTopics(args)
+	case "produce":
+		cmdProduce(args)
+	case "consume":
+		cmdConsume(args)
+	case "verify":
+		cmdVerify(args)
+	case "dlq":
+		cmdDLQ(args[0])
+	case "offsets":
+		cmdOffsets()
 	}
 }
 
-func die(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err)
-	os.Exit(1)
+func client(opts ...kgo.Opt) *kgo.Client {
+	cl, _ := kgo.NewClient(append(opts, kgo.SeedBrokers("localhost:29092"))...)
+	return cl
 }
 
-func admin() (*kadm.Client, func(), error) {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
-	if err != nil {
-		return nil, nil, err
-	}
-	return kadm.NewClient(cl), cl.Close, nil
-}
+func admin() *kadm.Client { return kadm.NewClient(client()) }
 
-// topics recreates every lab topic, so a count is a count and not a delta
-// against whatever the last run left behind.
-func cmdTopics(args []string) error {
+// topics recreates every lab topic.
+func cmdTopics(args []string) {
 	fs := flag.NewFlagSet("topics", flag.ExitOnError)
 	retention := fs.String("retention-ms", "", "retention.ms for the live topic; empty keeps the broker default (7 days)")
 	fs.Parse(args)
 
-	adm, closeFn, err := admin()
-	if err != nil {
-		return err
-	}
-	defer closeFn()
-
 	ctx := context.Background()
-	if _, err := adm.DeleteTopics(ctx, labTopics()...); err != nil {
-		return err
-	}
+	adm := admin()
+	adm.DeleteTopics(ctx, labTopics()...)
 	for _, topic := range labTopics() {
 		configs := map[string]*string{}
 		if topic == liveTopic && *retention != "" {
@@ -96,41 +76,27 @@ func cmdTopics(args []string) error {
 		}
 		// Deletion is asynchronous on the controller; creating again too
 		// early races it and comes back as TOPIC_ALREADY_EXISTS.
-		created := false
-		for range 50 {
+		for {
 			resp, err := adm.CreateTopic(ctx, partitions, 1, configs, topic)
 			if err == nil && resp.Err == nil {
-				created = true
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		if !created {
-			return fmt.Errorf("could not create topic %s", topic)
-		}
 	}
-	fmt.Fprintf(os.Stderr, "topics: %s (%d partitions)\n", strings.Join(labTopics(), ", "), partitions)
-	return nil
 }
 
-func cmdProduce(args []string) error {
+func cmdProduce(args []string) {
 	fs := flag.NewFlagSet("produce", flag.ExitOnError)
 	n := fs.Int("n", 6000, "how many ids to send")
 	rate := fs.Int("rate", 200, "records per second")
 	keys := fs.Int("keys", 30, "distinct keys")
 	fs.Parse(args)
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.DefaultProduceTopic(liveTopic))
-	if err != nil {
-		return err
-	}
+	cl := client(kgo.DefaultProduceTopic(liveTopic))
 	defer cl.Close()
 
-	var (
-		wg     sync.WaitGroup
-		failed atomic.Int64
-	)
-	ctx := context.Background()
+	var wg sync.WaitGroup
 	interval := time.Second / time.Duration(*rate)
 	start := time.Now()
 	for id := 1; id <= *n; id++ {
@@ -139,19 +105,9 @@ func cmdProduce(args []string) error {
 		time.Sleep(time.Until(start.Add(time.Duration(id-1) * interval)))
 		m := msg{id: id, key: keyOf(id, *keys), seq: seqOf(id, *keys), producedMs: time.Now().UnixMilli()}
 		wg.Add(1)
-		cl.Produce(ctx, &kgo.Record{Key: []byte(m.key), Value: m.encode()}, func(_ *kgo.Record, err error) {
-			defer wg.Done()
-			if err != nil {
-				failed.Add(1)
-			}
-		})
+		cl.Produce(context.Background(), &kgo.Record{Key: []byte(m.key), Value: m.encode()}, func(*kgo.Record, error) { wg.Done() })
 	}
 	wg.Wait()
-	if failed.Load() > 0 {
-		return fmt.Errorf("%d records failed to produce", failed.Load())
-	}
-	fmt.Fprintf(os.Stderr, "produce: %d records in %s\n", *n, time.Since(start).Round(time.Millisecond))
-	return nil
 }
 
 func keyOf(id, keys int) string { return fmt.Sprintf("k%02d", (id-1)%keys) }
@@ -166,15 +122,14 @@ type msg struct {
 func (m msg) encode() []byte { return fmt.Appendf(nil, "%d,%d,%d", m.id, m.seq, m.producedMs) }
 
 func decode(rec *kgo.Record) msg {
-	var m msg
+	m := msg{key: string(rec.Key)}
 	fmt.Sscanf(string(rec.Value), "%d,%d,%d", &m.id, &m.seq, &m.producedMs)
-	m.key = string(rec.Key)
 	return m
 }
 
 // faults is the downstream the handler calls, and every way it can go wrong.
-// Failures are chosen by id, not at random, so the same run fails the same
-// records every time and variants are comparable.
+// Failures are chosen by id, not at random, so every variant fails the same
+// records.
 type faults struct {
 	// Every flakyEvery-th id fails its first flakyTimes attempts, then works:
 	// a timeout, a 503, a deadlock victim. Retryable.
@@ -221,7 +176,7 @@ func (s *sink) write(m msg, attempt int, flag string) {
 	fmt.Fprintf(s.f, "%d,%s,%d,%d,%d,%d,%s\n", m.id, m.key, m.seq, m.producedMs, time.Now().UnixMilli(), attempt, flag)
 }
 
-func cmdConsume(args []string) error {
+func cmdConsume(args []string) {
 	fs := flag.NewFlagSet("consume", flag.ExitOnError)
 	mode := fs.String("mode", "tiered", "blocking | tiered")
 	group := fs.String("group", "lab", "consumer group (tiers use <group>.retry.N)")
@@ -238,55 +193,31 @@ func cmdConsume(args []string) error {
 	fs.DurationVar(&f.work, "work", time.Millisecond, "cost of one successful call")
 	fs.Parse(args)
 
-	if err := os.MkdirAll("out", 0o755); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(*sinkPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+	os.MkdirAll("out", 0o755)
+	file, _ := os.OpenFile(*sinkPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	out := &sink{f: file}
 
 	// Any attempt counts as activity, failed ones included: a blocking
 	// consumer stuck on a poison pill is busy, not idle, and only the deadline
 	// ends it.
 	var lastAttempt atomic.Int64
-	var handled, deadLettered atomic.Int64
 	handle := func(rec *kgo.Record, attempt int) error {
 		lastAttempt.Store(time.Now().UnixNano())
 		m := decode(rec)
 		flag, err := f.call(m, attempt)
-		if err != nil {
-			return err
+		if err == nil {
+			out.write(m, attempt, flag)
 		}
-		out.write(m, attempt, flag)
-		handled.Add(1)
-		return nil
+		return err
 	}
 
 	var consumers []*consumer
-	switch *mode {
-	case "blocking":
-		c, err := newConsumer(brokers, *group, liveTopic)
-		if err != nil {
-			return err
-		}
-		defer c.client.Close()
-		consumers = []*consumer{c}
-	case "tiered":
-		p, err := newPipeline(brokers, *group, func(rec *kgo.Record) {
-			m := decode(rec)
-			out.write(m, retryCount(rec)+1, "dlq")
-			deadLettered.Add(1)
+	if *mode == "tiered" {
+		consumers = newPipeline(*group, func(rec *kgo.Record) {
+			out.write(decode(rec), retryCount(rec)+1, "dlq")
 		})
-		if err != nil {
-			return err
-		}
-		defer p.close()
-		consumers = p.consumers
-	default:
-		return fmt.Errorf("-mode must be blocking or tiered, got %q", *mode)
+	} else {
+		consumers = []*consumer{newConsumer(*group, liveTopic)}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -302,14 +233,17 @@ func cmdConsume(args []string) error {
 			break
 		}
 		if *deadline > 0 && time.Since(start) > *deadline {
-			fmt.Fprintf(os.Stderr, "consume: deadline %s reached\n", *deadline)
 			break
 		}
 	}
 	cancel()
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "consume: %s handled=%d dead-lettered=%d\n", *mode, handled.Load(), deadLettered.Load())
-	return nil
+	// Leaves the group now rather than when the session times out (45s):
+	// replay.sh resets the group's offsets next, and the broker refuses that
+	// while the group still has members.
+	for _, c := range consumers {
+		c.client.Close()
+	}
 }
 
 type line struct {
@@ -319,20 +253,14 @@ type line struct {
 	flag      string
 }
 
-func readSink(path string) ([]line, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
+func readSink(path string) []line {
+	f, _ := os.Open(path)
 	defer f.Close()
 
 	var lines []line
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		p := strings.Split(sc.Text(), ",")
-		if len(p) != 7 {
-			continue
-		}
 		var l line
 		l.id, _ = strconv.Atoi(p[0])
 		l.key = p[1]
@@ -343,10 +271,10 @@ func readSink(path string) ([]line, error) {
 		l.flag = p[6]
 		lines = append(lines, l)
 	}
-	return lines, sc.Err()
+	return lines
 }
 
-func cmdVerify(args []string) error {
+func cmdVerify(args []string) {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	view := fs.String("view", "pipeline", "pipeline | dlq | replay")
 	label := fs.String("label", "", "row label")
@@ -356,35 +284,23 @@ func cmdVerify(args []string) error {
 	header := fs.Bool("header", false, "print the column header and exit")
 	fs.Parse(args)
 
-	switch *view {
-	case "pipeline":
-		if *header {
+	if *header {
+		switch *view {
+		case "pipeline":
 			fmt.Println("variant\t| delivered\t| dlq\t| dup\t| drain\t| p50 first try\t| p99 first try\t| p50 retried\t| out of order\t| stale keys")
-			return nil
-		}
-	case "dlq":
-		// Latency means nothing here: a merge resets the retry count, so a
-		// merged record looks like a first try that took minutes.
-		if *header {
+		case "dlq":
+			// Latency means nothing here: a merge resets the retry count, so a
+			// merged record looks like a first try that took minutes.
 			fmt.Println("moment\t| delivered\t| dlq\t| dup\t| out of order\t| stale keys")
-			return nil
-		}
-	case "replay":
-		if *header {
+		case "replay":
 			fmt.Println("moment\t| sink\t| rows\t| distinct ids\t| duplicate rows\t| wrong rows")
-			return nil
 		}
-	default:
-		return fmt.Errorf("-view must be pipeline, dlq or replay, got %q", *view)
+		return
 	}
 
-	lines, err := readSink(*path)
-	if err != nil {
-		return err
-	}
 	var ok []line
 	dlq := 0
-	for _, l := range lines {
+	for _, l := range readSink(*path) {
 		if l.flag == "dlq" {
 			dlq++
 		} else {
@@ -413,29 +329,15 @@ func cmdVerify(args []string) error {
 		}
 		fmt.Printf("%s\t| append (INSERT)\t| %d\t| %d\t| %d\t| %d\n", *label, len(ok), len(delivered), dup, wrongAppend)
 		fmt.Printf("%s\t| upsert by id\t| %d\t| %d\t| %d\t| %d\n", *label, len(delivered), len(delivered), 0, wrongUpsert)
-		return nil
-	}
-
-	var firstTry, retried []int64
-	var minProduced, maxHandled int64
-	for i, l := range ok {
-		if i == 0 || l.producedMs < minProduced {
-			minProduced = l.producedMs
-		}
-		maxHandled = max(maxHandled, l.handledMs)
-		if l.attempt == 1 {
-			firstTry = append(firstTry, l.handledMs-l.producedMs)
-		} else {
-			retried = append(retried, l.handledMs-l.producedMs)
-		}
+		return
 	}
 
 	// Out of order: handled after a later record of the same key already had
 	// been. Stale: the key's last write is not its latest event, so a
 	// last-write-wins table ends up holding an old value.
 	highest := map[string]int{}
-	outOfOrder := 0
 	final := map[string]int{}
+	outOfOrder := 0
 	for _, l := range ok {
 		if l.seq < highest[l.key] {
 			outOfOrder++
@@ -456,13 +358,24 @@ func cmdVerify(args []string) error {
 
 	if *view == "dlq" {
 		fmt.Printf("%s\t| %d/%d\t| %d\t| %d\t| %d\t| %d\n", *label, len(delivered), *n, dlq, dup, outOfOrder, stale)
-		return nil
+		return
+	}
+
+	var firstTry, retried []int64
+	minProduced, maxHandled := ok[0].producedMs, int64(0)
+	for _, l := range ok {
+		minProduced = min(minProduced, l.producedMs)
+		maxHandled = max(maxHandled, l.handledMs)
+		if l.attempt == 1 {
+			firstTry = append(firstTry, l.handledMs-l.producedMs)
+		} else {
+			retried = append(retried, l.handledMs-l.producedMs)
+		}
 	}
 	fmt.Printf("%s\t| %d/%d\t| %d\t| %d\t| %s\t| %s\t| %s\t| %s\t| %d\t| %d\n",
 		*label, len(delivered), *n, dlq, dup,
 		ms(maxHandled-minProduced), pct(firstTry, 50), pct(firstTry, 99), pct(retried, 50),
 		outOfOrder, stale)
-	return nil
 }
 
 func pct(xs []int64, p int) string {
@@ -482,31 +395,13 @@ func ms(v int64) string {
 
 // offsets prints the live topic's first and next offset summed over its
 // partitions: how much of the log still exists, and how much was ever written.
-func cmdOffsets(args []string) error {
-	adm, closeFn, err := admin()
-	if err != nil {
-		return err
-	}
-	defer closeFn()
-
+func cmdOffsets() {
 	ctx := context.Background()
-	starts, err := adm.ListStartOffsets(ctx, liveTopic)
-	if err == nil {
-		err = starts.Error()
-	}
-	if err != nil {
-		return err
-	}
-	ends, err := adm.ListEndOffsets(ctx, liveTopic)
-	if err == nil {
-		err = ends.Error()
-	}
-	if err != nil {
-		return err
-	}
+	adm := admin()
+	starts, _ := adm.ListStartOffsets(ctx, liveTopic)
+	ends, _ := adm.ListEndOffsets(ctx, liveTopic)
 	var start, end int64
 	starts.Each(func(o kadm.ListedOffset) { start += o.Offset })
 	ends.Each(func(o kadm.ListedOffset) { end += o.Offset })
 	fmt.Printf("%d\t%d\n", start, end)
-	return nil
 }

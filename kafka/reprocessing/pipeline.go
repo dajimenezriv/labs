@@ -9,14 +9,12 @@ package main
 //
 // The price is ordering. A record that fails is handled seconds (in production,
 // minutes) after the ones behind it, so a key's events no longer arrive in the
-// order they happened. A consumer that genuinely needs per-key order has to
-// block instead, and eat the head-of-line stall. Section 1 measures both.
+// order they happened. Section 1 measures both.
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 
@@ -28,8 +26,7 @@ const liveTopic = "readings"
 // retryDelays is one entry per retry topic: how long a record waits on that
 // tier before it is handled again. Each is longer than the last, so a
 // downstream that blipped is retried almost at once and one that is properly
-// down is not hammered while it recovers. Uber's are minutes; these are scaled
-// down so a record reaches the DLQ while you are still watching.
+// down is not hammered while it recovers.
 //
 // The blocking consumer backs off on the same ladder, so the two modes differ
 // only in where the wait happens.
@@ -80,11 +77,6 @@ const (
 // ladder to fail identically at the end of it.
 var errNonRetryable = errors.New("non-retryable")
 
-// Caps the error header. A handler that returns a whole response body would
-// otherwise push the record past the broker's size limit, and a record that
-// cannot be routed is a record the consumer has to block on.
-const maxErrorHeader = 512
-
 // handler processes one record. attempt is 1 the first time a record is seen.
 type handler func(rec *kgo.Record, attempt int) error
 
@@ -97,37 +89,28 @@ type consumer struct {
 	// live topic; a tier's backoff on a retry topic.
 	delay time.Duration
 
-	// What becomes of a record the handler rejected. nil means retry it in
-	// place until it succeeds -- the blocking consumer. Set, it moves the
-	// record to the next topic and the partition carries on.
-	route func(ctx context.Context, rec *kgo.Record, err error) error
+	// Moves a rejected record to the next topic so the partition carries on.
+	// nil means retry it in place until it succeeds: the blocking consumer.
+	route func(rec *kgo.Record, err error)
 }
 
-func newConsumer(brokers []string, group, topic string) (*consumer, error) {
-	client, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers...),
+func newConsumer(group, topic string) *consumer {
+	return &consumer{client: client(
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),
 		// Commit by hand, after the record is finished with. Autocommit could
 		// commit a record whose handler then fails, which loses it.
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return &consumer{client: client}, nil
+	)}
 }
 
 func (c *consumer) run(ctx context.Context, handle handler) {
 	for {
 		fetches := c.client.PollFetches(ctx)
-		if fetches.IsClientClosed() || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return
 		}
-		fetches.EachError(func(topic string, partition int32, err error) {
-			fmt.Fprintf(os.Stderr, "fetch %s/%d: %v\n", topic, partition, err)
-		})
 
 		var done []*kgo.Record
 		fetches.EachRecord(func(rec *kgo.Record) {
@@ -160,11 +143,7 @@ func (c *consumer) run(ctx context.Context, handle handler) {
 				// Handed on, so this copy is finished with and commits like a
 				// success would. That is the whole trick: the partition moves
 				// past the failure instead of sitting on it.
-				if err := c.route(ctx, rec, err); err != nil {
-					// The record is still only here. The broker being
-					// unwritable is not a situation this lab creates.
-					die(err)
-				}
+				c.route(rec, err)
 			}
 			done = append(done, rec)
 		})
@@ -174,11 +153,7 @@ func (c *consumer) run(ctx context.Context, handle handler) {
 		if ctx.Err() != nil {
 			return
 		}
-		if len(done) > 0 {
-			if err := c.client.CommitRecords(ctx, done...); err != nil {
-				fmt.Fprintf(os.Stderr, "commit: %v\n", err)
-			}
-		}
+		c.client.CommitRecords(ctx, done...)
 	}
 }
 
@@ -204,82 +179,49 @@ func retryInPlace(ctx context.Context, rec *kgo.Record, handle handler) bool {
 	}
 }
 
-// pipeline is the live consumer plus one consumer per tier, each its own
+// newPipeline is the live consumer plus one consumer per tier, each its own
 // consumer group reading its own topic, so a backlog of retries cannot slow
 // live traffic and the tiers rebalance and commit separately. They share one
 // process here only because there is no reason for four.
-type pipeline struct {
-	producer  *kgo.Client
-	consumers []*consumer
-	// Called with every record sent to the DLQ, so the sink can count them.
-	deadLetter func(rec *kgo.Record)
-}
+func newPipeline(group string, deadLetter func(*kgo.Record)) []*consumer {
+	producer := client()
 
-func newPipeline(brokers []string, group string, deadLetter func(*kgo.Record)) (*pipeline, error) {
-	producer, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
-	if err != nil {
-		return nil, err
-	}
-	p := &pipeline{producer: producer, deadLetter: deadLetter}
-
-	live, err := newConsumer(brokers, group, liveTopic)
-	if err != nil {
-		return nil, err
-	}
-	live.route = p.route
-	p.consumers = append(p.consumers, live)
-
-	for tier := 1; tier <= len(retryDelays); tier++ {
-		c, err := newConsumer(brokers, fmt.Sprintf("%s.retry.%d", group, tier), retryTopic(tier))
-		if err != nil {
-			return nil, err
+	// Publishes a rejected record onto the next topic along. ProduceSync, so
+	// the record is on the next topic before this copy is committed: commit
+	// first and a crash in between loses it.
+	route := func(rec *kgo.Record, err error) {
+		count := retryCount(rec) + 1
+		destination := retryTopic(count)
+		if count > len(retryDelays) || errors.Is(err, errNonRetryable) {
+			destination = dlqTopic
+			deadLetter(rec)
 		}
+		producer.ProduceSync(context.Background(), &kgo.Record{
+			Topic: destination,
+			// Same key, so a record keeps landing on the same partition of
+			// whatever topic it is on and the tiers stay as parallel as the
+			// original.
+			Key:     rec.Key,
+			Value:   rec.Value,
+			Headers: routeHeaders(rec, count, err),
+		})
+	}
+
+	live := newConsumer(group, liveTopic)
+	live.route = route
+	consumers := []*consumer{live}
+	for tier := 1; tier <= len(retryDelays); tier++ {
+		c := newConsumer(fmt.Sprintf("%s.retry.%d", group, tier), retryTopic(tier))
 		c.delay = retryDelays[tier-1]
-		c.route = p.route
-		p.consumers = append(p.consumers, c)
+		c.route = route
+		consumers = append(consumers, c)
 	}
-	return p, nil
-}
-
-func (p *pipeline) close() {
-	for _, c := range p.consumers {
-		c.client.Close()
-	}
-	p.producer.Close()
-}
-
-// route publishes a rejected record onto the next topic along. Returning an
-// error means the record is still only on the topic it came from, so the
-// caller must not commit it.
-func (p *pipeline) route(ctx context.Context, rec *kgo.Record, handleErr error) error {
-	count := retryCount(rec) + 1
-
-	destination := retryTopic(count)
-	if count > len(retryDelays) || errors.Is(handleErr, errNonRetryable) {
-		destination = dlqTopic
-	}
-
-	err := p.producer.ProduceSync(ctx, &kgo.Record{
-		Topic: destination,
-		// Same key, so a record keeps landing on the same partition of
-		// whatever topic it is on and the tiers stay as parallel as the
-		// original.
-		Key:     rec.Key,
-		Value:   rec.Value,
-		Headers: routeHeaders(rec, count, handleErr),
-	}).FirstErr()
-	if err != nil {
-		return fmt.Errorf("route to %s: %w", destination, err)
-	}
-	if destination == dlqTopic {
-		p.deadLetter(rec)
-	}
-	return nil
+	return consumers
 }
 
 // routeHeaders builds the headers for the next hop: the origin headers from
 // the first hop, carried unchanged, plus a fresh retry count and error.
-func routeHeaders(rec *kgo.Record, count int, handleErr error) []kgo.RecordHeader {
+func routeHeaders(rec *kgo.Record, count int, err error) []kgo.RecordHeader {
 	// Defaults for a record on its first hop. One that has been round before
 	// keeps the values it already carries.
 	origin := map[string]string{
@@ -288,45 +230,29 @@ func routeHeaders(rec *kgo.Record, count int, handleErr error) []kgo.RecordHeade
 		originalOffsetHeader:    strconv.FormatInt(rec.Offset, 10),
 		firstFailedAtHeader:     time.Now().UTC().Format(time.RFC3339),
 	}
-
-	headers := make([]kgo.RecordHeader, 0, len(rec.Headers)+len(origin)+2)
 	for _, h := range rec.Headers {
-		if _, isOrigin := origin[h.Key]; isOrigin {
+		if _, ok := origin[h.Key]; ok {
 			origin[h.Key] = string(h.Value)
-			continue
 		}
-		// Rewritten below. Copying this tier's as well would leave a record
-		// in the DLQ carrying one of each per hop.
-		if h.Key == retryCountHeader || h.Key == errorHeader {
-			continue
-		}
-		headers = append(headers, h)
+	}
+
+	headers := []kgo.RecordHeader{
+		{Key: retryCountHeader, Value: []byte(strconv.Itoa(count))},
+		{Key: errorHeader, Value: []byte(err.Error())},
 	}
 	for key, value := range origin {
 		headers = append(headers, kgo.RecordHeader{Key: key, Value: []byte(value)})
 	}
-
-	reason := handleErr.Error()
-	if len(reason) > maxErrorHeader {
-		reason = reason[:maxErrorHeader]
-	}
-	return append(headers,
-		kgo.RecordHeader{Key: retryCountHeader, Value: []byte(strconv.Itoa(count))},
-		kgo.RecordHeader{Key: errorHeader, Value: []byte(reason)},
-	)
-}
-
-func header(rec *kgo.Record, key string) string {
-	for _, h := range rec.Headers {
-		if h.Key == key {
-			return string(h.Value)
-		}
-	}
-	return ""
+	return headers
 }
 
 // Zero for a record on the live topic, which has no such header.
 func retryCount(rec *kgo.Record) int {
-	n, _ := strconv.Atoi(header(rec, retryCountHeader))
-	return n
+	for _, h := range rec.Headers {
+		if h.Key == retryCountHeader {
+			n, _ := strconv.Atoi(string(h.Value))
+			return n
+		}
+	}
+	return 0
 }

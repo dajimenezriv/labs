@@ -35,3 +35,4 @@ docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 
 # Zero records never start the idle clock, so the deadline ends it.
 "$BIN" consume -mode blocking -group "$GROUP" -sink "$SINK.replay" -idle 5s -deadline 10s
+echo "replayed: $(wc -l < "$SINK.replay") records"
