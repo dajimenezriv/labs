@@ -1,0 +1,2 @@
+pg_version = "18"
+excluded_rules = ["ban-drop-table", "require-timeout-settings"]

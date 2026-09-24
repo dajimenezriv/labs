@@ -56,11 +56,7 @@ func main() {
 	// The connection is lazy, until we don't do the first request it doesn't connect.
 	// If the connection fails it will retry with backoff.
 	client := proto.NewAlertsClient(conn)
-	res, err := client.GetAlert(ctx, &proto.GetAlertRequest{Id: 1})
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(res)
+	fmt.Println(client.GetAlert(ctx, &proto.GetAlertRequest{Id: 1}))
 }
 
 type server struct {

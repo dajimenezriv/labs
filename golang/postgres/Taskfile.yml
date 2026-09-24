@@ -1,0 +1,37 @@
+version: "3"
+
+vars:
+  DB_URL: postgresql://postgres:postgres@localhost:5555/db?sslmode=disable
+  MIGRATIONS: migrations
+
+tasks:
+  run: go run .
+
+  squawk: squawk '{{.MIGRATIONS}}/*.sql'
+
+  sqlc:
+    - sqlc generate -f sqlc.yaml
+    - sqlc vet -f sqlc.yaml
+
+  migrate:create:
+    requires:
+      vars: [CLI_ARGS]
+    cmd: migrate create -ext sql -dir {{.MIGRATIONS}} -seq {{.CLI_ARGS}}
+
+  migrate:up:
+    desc: Apply all pending migrations
+    cmd: migrate -path {{.MIGRATIONS}} -database "{{.DB_URL}}" up
+
+  migrate:down:
+    desc: Roll back last migration
+    cmd: migrate -path {{.MIGRATIONS}} -database "{{.DB_URL}}" down 1
+
+  migrate:force:
+    desc: Force migration version (task migrate:force -- 1)
+    requires:
+      vars: [CLI_ARGS]
+    cmd: migrate -path {{.MIGRATIONS}} -database "{{.DB_URL}}" force {{.CLI_ARGS}}
+
+  migrate:version:
+    desc: Show the current schema version
+    cmd: migrate -path {{.MIGRATIONS}} -database "{{.DB_URL}}" version
