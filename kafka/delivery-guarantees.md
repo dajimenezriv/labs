@@ -56,24 +56,6 @@ docker compose kill -s SIGKILL kafka1
 
 [GitHub: franz-go producing and consuming.](https://github.com/twmb/franz-go/blob/master/docs/producing-and-consuming.md)
 
-Prometheus here scrapes every **1s**, against a default of 15s.
-
-- `topic` is split into N `partitions`, each a separate append-only log with its own offsets, its own leader and its own ordering.
-- `partitions`: how many independent logs.
-- `rf` (replication factor): how many copies of each partition.
-  - Replication factor 3 means each partition lives on 3 different brokers: one leader and two followers fetching from it.
-  - It sets how many failures the data can survive at all.
-  - It can't exceed the number of brokers.
-  - It's fixed at creation in practice; changing it later means a partition reassignment, not a config flip.
-- `min.insync.replicas`: how many copies must be done for `acks=all` to succeed. Can be changed easily.
-- `acks` is a producer setting, sent on every producer request. Trades latency for safety.
-  - `acks=0`: waits until the message is dispatched to the socket buffer. Does not wait for any response from the broker.
-  - `acks=1`: waits until the partition leader receives the record and writes it to its local log.
-  - `acks=all`: waits until the full set of ISR acknowledge the record.
-- **High watermark (HW)**: the highest offset that has been successfully replicated across all ISRs for a partition. Consumers can only read messages up to the high watermark to prevent reading uncommitted data that might disappear if a leader fails.
-
-The classic combination is `rf=3`, `min.insync.replicas=2`, `acks=all`. Both the Java client (since 3.0) and franz-go default to `acks=all` with the idempotent producer.
-
 ```bash
 # Use the kafka-topics tool to create or delete a topic.
 docker compose exec kafka1 /opt/kafka/bin/kafka-topics.sh
