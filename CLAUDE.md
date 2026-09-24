@@ -1,46 +1,44 @@
 # Labs
 
-Each lab reproduces one production situation, measures it, and explains it in a markdown writeup. The labs serve two purposes:
+Each lab is one markdown file that explains one production situation: how it happens, what it costs, and how to fix it. There is no runnable code. The labs serve two purposes:
 
 - **Learning**: understand how the thing actually behaves, not how the docs say it behaves.
 - **Interviews**: turn "have you dealt with X?" into a concrete story with a number attached.
 
+Model: [kafka/uber-and-replayable-dlq.md](kafka/uber-and-replayable-dlq.md).
+
 ## Layout
 
-Each lab is self-contained. Labs do not share code or containers; copy what you need instead of importing it from another lab.
+- One markdown file per lab, in the lab's folder. No `compose.yaml`, Go, scripts, or other files to run.
+- Older labs still have code (`delivery-guarantees`, `reprocessing`, the redis labs). Leave it alone, but don't add code to new labs or extend the old code.
 
-## Keep it minimal
+## Self-contained
 
-This is the main rule. A lab contains only what the situation needs.
+The markdown is the only thing read, so it has to stand on its own.
 
-- Nothing that isn't part of the situation or needed to measure it: no extra services, config layers, packages, abstractions, logging, or error handling for things the lab never triggers.
-- Before adding a file, dependency, flag, or container, check that the writeup uses it. If it doesn't, leave it out.
-- One flat `package main` is the default. Split files by concern only when a file gets hard to read.
-- Prometheus/Grafana only when a graph over time shows something a results table can't.
+- Every code snippet is complete enough to understand without the source. If a snippet calls a helper (`drain`, `admin()`, `routeHeaders`), either show it or explain what it does in one line.
+- Include a code snippet wherever it links the text to the mechanism: the routing decision, the commit order, the SQL that makes a write idempotent, the CLI command an operator types. Skip code that only wires things together.
+- CLI commands are written the way they'd be typed in the lab's environment (`docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh ...`).
+
+## Numbers are derived, not measured
+
+- Tables hold the numbers that **should** happen, derived from the setup section. Put a note under the title saying they're expected, not measured.
+- Show the arithmetic behind any number that isn't obvious (`12 × 3s = 36s of stall`), so it can be repeated in an interview.
+- Use `~` for anything that depends on timing or queueing, and `≥` or a range where the exact value depends on luck. Don't fake precision.
+- Keep the setup small and round (6000 records, 200/s, 30 keys) so the derivations stay simple.
 
 ## Mimic production
 
-- Use stock defaults. Change a setting only when that setting is what the lab is about, and add a comment saying why.
-- Never configure something to fail just to show the failure. If the defaults already prevent the problem, that is the finding and it goes in the writeup.
-- Scaling things down to make runs fast (lower `max_connections`, shorter TTLs, fewer CPUs) is fine. State it in the setup section.
-
-## Measure, don't claim
-
-- Every claim in a writeup is backed by output from a real run. Never invent or estimate numbers. If you couldn't run it, say so and leave the table empty.
-- Scripts print results in a shape that pastes straight into a markdown table.
-- Compare variants on the same rig, changing one thing at a time: baseline, break it, fix it.
+- Describe behavior on stock defaults. Name the defaults (`max.poll.interval.ms` = 300000, `retention.ms` = 7 days).
+- Never build a scenario on a setting changed just to make it fail. If the defaults prevent the problem, that is the finding.
+- Scaling things down for the example (seconds instead of minutes) is fine. Say so in the setup section.
 
 ## Writeup style
 
-- `# Title`, a table of contents for longer writeups, then the command that starts everything (`docker compose up`).
-- `## The setup`: bullets with the numbers that matter (sizes, rates, limits) and why they make the situation reproducible.
-- Numbered sections, one per scenario. Each has the command to run, the results table, then short bullets explaining what the numbers mean. Bold the takeaway.
-- Explain the mechanism (why it happens), not just the result. Include the error codes, default values, and config names an interviewer would probe.
-- Terse bullets over prose. Include code only for the few lines the point depends on.
-
-## Code conventions
-
-- Go: check `go.mod` for the version and use the newest stdlib affordances (`wg.Go`, etc.).
-- Go errors: skip `if err != nil` for errors the lab isn't about (setup, marshalling, closing, etc.) and discard them with `_`. Only check the errors the writeup explains or the measurement counts. The labs are not about learning Go, so the code should show only what matters to the situation. Exception: the `golang` lab, where error handling is part of the point.
-- Bash scripts start with `set -euo pipefail` and `cd "$(dirname "$0")"`. Shared helpers for a lab go in its `lib.sh`.
-- Build binaries into a temp dir or gitignore them, along with any `out/` directory.
+- `# Title`, the expected-numbers note, a table of contents.
+- `## The setup`: bullets with the numbers that matter (sizes, rates, limits, failure rates).
+- Numbered sections, one per concept. Each explains the mechanism, shows the snippets it depends on, then an `### Expected results` table with short bullets on what the numbers mean. Bold the takeaway.
+- Explain why it happens, not just what happens. Include the error codes, default values, and config names an interviewer would probe.
+- Show both sides where there's a tradeoff: the naive approach, why it breaks, and the fix.
+- End with `## Interview answers`: the likely questions, each answered in two or three sentences.
+- Terse bullets over prose. Comparison tables where two things are easy to confuse (fetch position vs committed offset).
