@@ -10,7 +10,7 @@ Model: [kafka/uber-and-replayable-dlq.md](kafka/uber-and-replayable-dlq.md).
 ## Layout
 
 - One markdown file per lab, in the lab's folder. No `compose.yaml`, Go, scripts, or other files to run.
-- Older labs still have code (`delivery-guarantees`, `reprocessing`, the redis labs). Leave it alone, but don't add code to new labs or extend the old code.
+- Older labs still have code (`reprocessing`, the redis labs). Leave it alone, but don't add code to new labs or extend the old code.
 
 ## Self-contained
 
