@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+option go_package = "alerts/proto";
+
+package alerts;
+
+service Alerts {
+  rpc GetAlert(GetAlertRequest) returns (GetAlertResponse);
+}
+
+message Alert {
+  int64 id = 1;
+}
+
+message GetAlertRequest {
+  int64 id = 1;
+}
+
+message GetAlertResponse {
+  Alert alert = 1;
+  bool ok = 2;
+}
