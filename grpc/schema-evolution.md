@@ -8,12 +8,12 @@
 
 ## 1. Protobuf fails silently
 
-| wire type | id  | used by                                                  |
-| --------- | --- | -------------------------------------------------------- |
-| VARINT    | 0   | int32, int64, uint32, uint64, sint32, sint64, bool, enum |
-| I64       | 1   | double, fixed64, sfixed64                                |
-| LEN       | 2   | string, bytes, embedded messages, packed repeated        |
-| I32       | 5   | float, fixed32, sfixed32                                 |
+| wire type | used by                                                  |
+| --------- | -------------------------------------------------------- |
+| VARINT    | int32, int64, uint32, uint64, sint32, sint64, bool, enum |
+| I64       | double, fixed64, sfixed64                                |
+| LEN       | string, bytes, embedded messages, packed repeated        |
+| I32       | float, fixed32, sfixed32                                 |
 
 ```proto
 enum Severity {
@@ -104,16 +104,14 @@ Categories, from strictest to loosest:
 
 ### Expected results
 
-| change                                |     `FILE`     | `WIRE_JSON` | `WIRE` |
-| ------------------------------------- | :------------: | :---------: | :----: |
-| reuse 5 (`int64` → `int64`, new name) |       ✗        |      ✗      | passes |
-| `int32 id` → `int64`                  |       ✗        |      ✗      | passes |
-| `double value` → `string`             |       ✗        |      ✗      |   ✗    |
-| rename `sensor_id` → `device_id`      |       ✗        |      ✗      | passes |
-| delete `note`, not reserved           |       ✗        |      ✗      |   ✗    |
-| delete `note`, reserved               |       ✗        |   passes    | passes |
-| add `SEVERITY_CRITICAL`               |     passes     |   passes    | passes |
-| fixed v2 (section 7)                  | ✗ (the delete) |   passes    | passes |
+| change                                     | `FILE` | `WIRE_JSON` | `WIRE` |
+| ------------------------------------------ | :----: | :---------: | :----: |
+| reuse number (`int64` → `int64`, new name) |   ✗    |      ✗      | passes |
+| `int32 id` → `int64`                       |   ✗    |      ✗      | passes |
+| `double value` → `string`                  |   ✗    |      ✗      |   ✗    |
+| delete `note`, not reserved                |   ✗    |      ✗      |   ✗    |
+| delete `note`, reserved                    |   ✗    |   passes    | passes |
+| add `SEVERITY_CRITICAL`                    | passes |   passes    | passes |
 
 ## Interview answers
 
