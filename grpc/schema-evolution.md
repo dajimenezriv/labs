@@ -134,7 +134,7 @@ proto/alerts/v1/alerts.proto:15:3:Field "3" with name "value" on message "Alert"
 proto/alerts/v1/alerts.proto:17:9:Field "5" on message "Alert" changed name from "created_at_ms" to "acked_by".
 ```
 
-Categories, from strictest to loosest:
+Categories, from strictest to loosest (in Go we will use `PACKAGE`):
 
 | category    | protects                                                         | use it when                                    |
 | ----------- | ---------------------------------------------------------------- | ---------------------------------------------- |
