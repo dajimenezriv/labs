@@ -1,8 +1,5 @@
 # Observability
 
-- [Prometheus](#prometheus)
-  - [Metrics](#metrics)
-  - [Check metrics](#check-metrics)
 - [Tempo](#tempo)
   - [The wire format](#the-wire-format)
   - [Who creates spans](#who-creates-spans)
@@ -21,39 +18,12 @@ How are spans and so stored in tempo?
 
 Reasons to keep `request_id` and `trace_id`:
 
-- **Sampling**: at 1% sampling, a `trace_id` in a log line usually resolves to nothing. Then what's the point of the trace_id???
+- **Sampling**: at 1% sampling, a `trace_id` in a log line usually resolves to nothing. Then what's the point of the trace_id??? The question is, all error samples are captured, however how do we know to capture or not to capture? Cost of traces.
 - **Retention mismatch**: traces are expensive and usually kept less time than logs.
 - **Granularity**: a client could use the same `trace_id` to span multiple HTTP requests.
 
 1. Start in Loki filtered `level="error"`.
 2. Grab `trace_id`.
-
-## Prometheus
-
-- Collects and stores real-time numerical performance data.
-- It scraps an HTTP /metrics endpoint at a fixed interval (usually 15s). Targets must be discoverable (static config, DNS, Docker).
-
-### Metrics
-
-- **Counter**: just increases. Use `rate()` or `increase()`.
-- **Gauge**: goes up and down. Queue depth, memory, connections in use.
-- **Histogram**: cumulative buckets (`_bucket` with an `le` label) plus `_sum` and `_count`.
-
-| Group        | Count | Who wrote it                           |
-| ------------ | ----- | -------------------------------------- |
-| `go_*`       | 31    | Go runtime collector.                  |
-| `process_*`  | 9     | Linux `/proc`.                         |
-| `scrape_*`   | 5     | Prometheus, about the scrape itself.   |
-| `promhttp_*` | 2     | The metrics endpoint measuring itself. |
-
-### Check metrics
-
-- `docker compose stop payments`: watch payments instance metrics.
-- Hammer the gateway past its limit: `hey -z 30s -c 50 http://localhost:8000/identity/docs`.
-- `docker compose stop kafka` → outbox_pending_events climbs and never recovers.
-- `docker compose stop payments` while orders are being placed → `kafka_consumer_lag{group="payments"}` climbs; note it goes stale rather than climbing once the last scrape is gone, which is why the alert has to cover absence too.
-- Curl a service directly with random path segments → watch `prometheus_tsdb_head_series` climb and not come back down. That's the cardinality bomb, self-inflicted on purpose.
-- Slow something down past 5s → watch p99 stop moving while things get genuinely worse.
 
 ## Tempo
 
