@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+  # Stock default is 1m. Scaled down so the lab runs in seconds.
+  evaluation_interval: 5s
+
+rule_files:
+  - rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: app
+    static_configs:
+      - targets: ["app:8000"]

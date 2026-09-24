@@ -1,0 +1,22 @@
+# Durations are scaled down: read 30s as 5m.
+groups:
+  - name: lab
+    rules:
+      - alert: ConsumerLagHigh
+        expr: max by (job, group, topic, partition) (kafka_consumer_lag) > 1000
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.group }} is {{ $value }} behind on partition {{ $labels.partition }}"
+
+      - alert: RecordsInDLQ
+        expr: sum by (job, topic) (increase(kafka_retries_total{destination=~".+\\.dlq"}[1m])) > 0
+        labels:
+          severity: ticket
+
+      - alert: ServiceDown
+        expr: up{job="app"} == 0 or absent(up{job="app"})
+        for: 10s
+        labels:
+          severity: page
