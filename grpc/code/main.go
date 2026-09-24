@@ -46,7 +46,10 @@ func main() {
 }
 
 type server struct {
-	proto.UnimplementedAlertsServer
+	// If we don't implement the method it gets a default "not implemented" err.
+	// proto.UnimplementedAlertsServer
+	// If we don't implement the method it doesn't compile.
+	proto.UnsafeAlertsServer
 }
 
 func (s *server) GetAlert(ctx context.Context, in *proto.GetAlertRequest) (*proto.GetAlertResponse, error) {
