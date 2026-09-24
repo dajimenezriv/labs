@@ -2,6 +2,8 @@ services:
   app:
     image: golang:1.26-alpine
     command: ["go", "run", "/lab/main.go"]
+    volumes:
+      - ./main.go:/lab/main.go:ro
 
   prometheus:
     image: prom/prometheus:v3.7.3

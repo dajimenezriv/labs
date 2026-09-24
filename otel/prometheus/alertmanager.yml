@@ -19,6 +19,6 @@ inhibit_rules:
 
 receivers:
   - name: pager
-    webhook_configs: [{ url: http://receiver:8000/pager }]
+    webhook_configs: [{ url: http://app:8000/pager }]
   - name: ticket
-    webhook_configs: [{ url: http://receiver:8000/ticket }]
+    webhook_configs: [{ url: http://app:8000/ticket }]
