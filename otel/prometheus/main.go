@@ -3,11 +3,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
-	"os"
 	"time"
 )
+
+const metrics = `# TYPE kafka_consumer_lag gauge
+kafka_consumer_lag{group="alerts",topic="sensor.readings",partition="0"} 0
+kafka_consumer_lag{group="alerts",topic="sensor.readings",partition="1"} 0
+kafka_consumer_lag{group="alerts",topic="sensor.readings",partition="2"} 5000
+`
 
 // What Alertmanager posts to a webhook, trimmed to the fields printed here.
 type notification struct {
@@ -24,13 +30,8 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		body, err := os.ReadFile("/lab/metrics.txt")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		w.Write(body)
+		io.WriteString(w, metrics)
 	})
 
 	mux.HandleFunc("POST /{receiver}", func(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +50,7 @@ func main() {
 		}
 	})
 
+	fmt.Println("listening on :8000, waiting for notifications")
 	if err := http.ListenAndServe(":8000", mux); err != nil {
 		panic(err)
 	}

@@ -1,27 +1,11 @@
 services:
-  # The fake target: serves metrics.txt as /metrics.
   app:
     image: golang:1.26-alpine
     command: ["go", "run", "/lab/main.go"]
-    # The folder, not metrics.txt alone: editors save by replacing the file, and
-    # a single-file bind mount keeps pointing at the old one.
-    volumes:
-      - ./:/lab:ro
-      - /etc/localtime:/etc/localtime:ro
-
-  # The fake pager: same program, prints every notification Alertmanager posts.
-  # Its own container so stopping app does not take the pager down with it.
-  receiver:
-    image: golang:1.26-alpine
-    command: ["go", "run", "/lab/main.go"]
-    volumes:
-      - ./:/lab:ro
-      - /etc/localtime:/etc/localtime:ro
 
   prometheus:
     image: prom/prometheus:v3.7.3
-    ports:
-      - "9090:9090"
+    attach: false
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./rules.yml:/etc/prometheus/rules.yml:ro
@@ -29,7 +13,6 @@ services:
 
   alertmanager:
     image: prom/alertmanager:v0.31.0
-    ports:
-      - "9093:9093"
+    attach: false
     volumes:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro

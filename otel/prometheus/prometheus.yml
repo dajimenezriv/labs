@@ -1,7 +1,6 @@
 global:
-  scrape_interval: 5s
-  # Stock default is 1m. Scaled down so the lab runs in seconds.
-  evaluation_interval: 5s
+  scrape_interval: 1s
+  evaluation_interval: 1s
 
 rule_files:
   - rules.yml

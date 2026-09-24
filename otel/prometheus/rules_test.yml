@@ -1,23 +1,23 @@
 rule_files: [rules.yml]
-evaluation_interval: 5s
+evaluation_interval: 1s
 tests:
   # The DLQ series appears already at 1: increase() has no 0 → 1 step to see.
-  - interval: 5s
+  - interval: 1s
     input_series:
       - series: 'kafka_retries_total{job="app",topic="sensor.readings",destination="sensor.readings.dlq"}'
-        values: "_ _ 1 1 1 1 1"
+        values: "_ _ 1x8"
     alert_rule_test:
-      - eval_time: 30s
+      - eval_time: 10s
         alertname: RecordsInDLQ
         exp_alerts: []
 
   # Same record, but the series was initialised to 0 first: it alerts.
-  - interval: 5s
+  - interval: 1s
     input_series:
       - series: 'kafka_retries_total{job="app",topic="sensor.readings",destination="sensor.readings.dlq"}'
-        values: "0 0 1 1 1 1 1"
+        values: "0 0 1x8"
     alert_rule_test:
-      - eval_time: 30s
+      - eval_time: 10s
         alertname: RecordsInDLQ
         exp_alerts:
           - exp_labels: { job: app, topic: sensor.readings, severity: ticket }

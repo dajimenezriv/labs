@@ -1,6 +1,0 @@
-# TYPE kafka_consumer_lag gauge
-kafka_consumer_lag{group="alerts",topic="sensor.readings",partition="0"} 5000
-kafka_consumer_lag{group="alerts",topic="sensor.readings",partition="1"} 0
-kafka_consumer_lag{group="alerts",topic="sensor.readings",partition="2"} 0
-
-# TYPE kafka_retries_total counter

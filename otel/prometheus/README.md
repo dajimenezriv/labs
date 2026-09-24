@@ -12,9 +12,10 @@ The hands-on half of [../prometheus-alerts.md](../prometheus-alerts.md). No Kafk
 Timings are scaled down (stock → lab): `evaluation_interval` 1m → 5s, `for` 5m → 30s, `group_wait` 30s → 10s, `group_interval` 5m → 30s.
 
 ```sh
-docker compose up
-docker compose logs -f receiver   # leave this open: it's the pager
+docker compose up   # shows only the receiver: the pager
 ```
+
+Nothing is printed until a notification arrives. With the lag at `5000`, the first page shows up **~45–60s** after `up`: a few seconds for `go run` to compile, then scrape + eval, `for: 30s`, and `group_wait: 10s`. Everything at `0` means no alerts, so nothing is printed at all.
 
 Timings below are from one run.
 
