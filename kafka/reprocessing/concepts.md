@@ -15,7 +15,6 @@
 	- [`purge`](#purge)
 	- [Expected results](#expected-results-2)
 - [5. Rewinding a consumer group](#5-rewinding-a-consumer-group)
-	- [Expected results](#expected-results-3)
 - [6. Retention is the replay window](#6-retention-is-the-replay-window)
 - [Interview answers](#interview-answers)
 
@@ -303,30 +302,16 @@ A deploy writes wrong results for ids 2001..3000 and raises no errors. Hours lat
 
 ```bash
 # Stop the consumers first: the broker refuses to reset a group with live members.
-kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group readings-consumer \
-  --topic readings --reset-offsets --to-datetime 2026-09-23T14:05:00.000 --execute
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh
+	--bootstrap-server kafka:9092 \
+	--group readings-consumer \
+	--topic readings \
+	--reset-offsets \
+	--to-datetime 2026-09-23T14:05:00.000 \
+	--execute
 ```
 
-- Without `--execute`, it's a dry run: it prints the plan and changes nothing.
-- `--to-datetime` looks up, per partition, the first offset with timestamp ≥ T (the time index). The partitions land on different offsets for the same instant.
-- Other modes: `--to-earliest`, `--to-latest`, `--to-offset`, `--shift-by -N`, `--by-duration PT2H`.
-
-### Expected results
-
-The rewind point is id 2001, so the replay is ids 2001..6000 = **4000 records to fix 1000**.
-
-| moment        | sink            |  rows | duplicate rows | wrong rows |
-| ------------- | --------------- | ----: | -------------: | ---------: |
-| before replay | append (INSERT) |  6000 |              0 |       1000 |
-| before replay | upsert by id    |  6000 |              0 |       1000 |
-| after replay  | append (INSERT) | 10000 |           4000 |       1000 |
-| after replay  | upsert by id    |  6000 |              0 |          0 |
-
-- **A rewind is a point in time, not a set.** Everything after it replays, including the 3000 good records.
-- **Append-only sink**: 4000 duplicates, and the 1000 wrong rows are _still there_ next to the corrected ones. **Upsert by id**: fixed.
-- Side effects outside the sink (emails, payments, webhooks) replay too.
-
-**Replay only repairs an idempotent sink.**
+- We need to make the consumer idempotent or we will get duplicates.
 
 ## 6. Retention is the replay window
 
