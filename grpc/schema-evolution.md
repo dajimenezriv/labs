@@ -104,14 +104,15 @@ Categories, from strictest to loosest:
 
 ### Expected results
 
-| change                                     | `FILE` | `WIRE_JSON` | `WIRE` |
-| ------------------------------------------ | :----: | :---------: | :----: |
-| reuse number (`int64` → `int64`, new name) |   ✗    |      ✗      | passes |
-| `int32 id` → `int64`                       |   ✗    |      ✗      | passes |
-| `double value` → `string`                  |   ✗    |      ✗      |   ✗    |
-| delete `note`, not reserved                |   ✗    |      ✗      |   ✗    |
-| delete `note`, reserved                    |   ✗    |   passes    | passes |
-| add `SEVERITY_CRITICAL`                    | passes |   passes    | passes |
+| change                                             | `FILE` | `PACKAGE` | `WIRE_JSON` | `WIRE` |
+| -------------------------------------------------- | :----: | :-------: | :---------: | :----: |
+| reuse number (`int64` → `int64`, new name)         |   ✗    |     ✗     |      ✗      | passes |
+| `int32 id` → `int64`                               |   ✗    |     ✗     |      ✗      | passes |
+| `double value` → `string`                          |   ✗    |     ✗     |      ✗      |   ✗    |
+| delete `note`, not reserved                        |   ✗    |     ✗     |      ✗      |   ✗    |
+| delete `note`, reserved                            |   ✗    |     ✗     |   passes    | passes |
+| add `SEVERITY_CRITICAL`                            | passes |  passes   |   passes    | passes |
+| move `Severity` to `severity.proto` (same package) |   ✗    |  passes   |   passes    | passes |
 
 ## Interview answers
 
