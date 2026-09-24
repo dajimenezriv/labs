@@ -4,7 +4,6 @@
 - [2. The fix: reserved and safe evolution rules](#2-the-fix-reserved-and-safe-evolution-rules)
 - [3. buf breaking in CI](#3-buf-breaking-in-ci)
   - [Expected results](#expected-results)
-- [Interview answers](#interview-answers)
 
 ## 1. Protobuf fails silently
 
@@ -113,25 +112,3 @@ Categories, from strictest to loosest:
 | delete `note`, reserved                            |   ✗    |     ✗     |   passes    | passes |
 | add `SEVERITY_CRITICAL`                            | passes |  passes   |   passes    | passes |
 | move `Severity` to `severity.proto` (same package) |   ✗    |  passes   |   passes    | passes |
-
-## Interview answers
-
-**"How do you evolve a protobuf schema safely?"**
-Only add fields, with new numbers. Never reuse a number: delete the field and `reserved` both the number and the name. To change a field's type or meaning, add a new field, write both until every reader has moved, then delete the old one and reserve it. `buf breaking` runs in CI against main to enforce it.
-
-**"What's the most dangerous change?"**
-Reusing a field number with the same wire type. Readers decode it as the old field with no error.
-
-**"Why doesn't protobuf error on a mismatch?"**
-Tolerance is the design goal. A field number the reader doesn't know, or one with the wrong wire type, becomes an unknown field and the value is left at zero. proto3 doesn't send zero values, so "missing" and "default" look the same.
-
-**"Is renaming a field safe?"**
-
-- In binary, yes: names aren't on the wire.
-- In JSON, no: protojson uses the name.
-
-**"Which side do you deploy first?"**
-The reader of the change.
-
-- Request changes: server first.
-- Response changes: clients first.
