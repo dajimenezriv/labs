@@ -9,6 +9,10 @@
 	- [The fix lives in the sink](#the-fix-lives-in-the-sink)
 	- [Expected results](#expected-results-1)
 - [4. The DLQ and merging it back](#4-the-dlq-and-merging-it-back)
+	- [Reading the whole DLQ: `drain`](#reading-the-whole-dlq-drain)
+	- [`list`](#list)
+	- [`merge`](#merge)
+	- [`purge`](#purge)
 	- [Expected results](#expected-results-2)
 - [5. Rewinding a consumer group](#5-rewinding-a-consumer-group)
 	- [Expected results](#expected-results-3)
@@ -196,15 +200,88 @@ Nothing consumes the DLQ. Someone has to, or it's a leak with a topic name. Thre
 | `dlq merge` | republish everything onto `readings.retry.1`              |
 | `dlq purge` | `DeleteRecords` up to the current end offsets             |
 
-Merge goes to **retry.1, not the live topic** (Uber's choice): records that already failed don't compete with live traffic, and if they fail again they walk the ladder and come back to the DLQ instead of looping.
+### Reading the whole DLQ: `drain`
+
+`list` and `merge` both start by reading everything currently in the DLQ. Two problems make that less trivial than a loop over `PollFetches`:
+
+- **When to stop.** A poll on a topic you've read to the end doesn't return "done". It blocks, waiting for the next record. So "drained" and "quiet" look the same. The fix: ask the broker for the **end offsets first** and stop once you've read that many records.
+- **Where it starts.** After a purge, a partition no longer starts at offset 0. It starts at the **log start offset**. Counting `end − 0` would wait forever for records that were deleted. So the count is `end − start`, per partition.
 
 ```go
-// Drop the retry count so a merged record gets every tier again.
-headers := slices.DeleteFunc(r.Headers, func(h kgo.RecordHeader) bool {
-	return h.Key == retryCountHeader || h.Key == errorHeader
-})
-producer.ProduceSync(ctx, &kgo.Record{Topic: retryTopic(1), Key: r.Key, Value: r.Value, Headers: headers})
+func drain(topic string) []*kgo.Record {
+	adm := admin()
+	starts, _ := adm.ListStartOffsets(ctx, topic) // first offset still in the log, per partition
+	ends, _ := adm.ListEndOffsets(ctx, topic)     // next offset to be written, per partition
+	pending := 0
+	ends.Each(func(end kadm.ListedOffset) {
+		start, _ := starts.Lookup(end.Topic, end.Partition)
+		pending += int(end.Offset - start.Offset)
+	})
+
+	// Never commits, so reading it twice shows the same records both times.
+	cl := client(kgo.ConsumeTopics(topic), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	defer cl.Close()
+	var records []*kgo.Record
+	for len(records) < pending {
+		records = append(records, cl.PollFetches(ctx).Records()...)
+	}
+	return records
+}
 ```
+
+### `list`
+
+Print each record with its headers. This is where the metadata from section 2 pays off: an operator sees why each record failed, where it came from and since when, without digging through logs.
+
+```go
+for _, r := range drain(dlqTopic) {
+	fmt.Printf("%d/%d key=%s value=%s", r.Partition, r.Offset, r.Key, r.Value)
+	for _, h := range r.Headers {
+		fmt.Printf(" %s=%s", h.Key, h.Value)
+	}
+	fmt.Println()
+}
+```
+
+```
+1/0 key=k29 value=300,10,1790172234105 error=non-retryable: unknown field "unit"
+    first_failed_at=2026-09-23T14:03:54Z original_offset=109 original_partition=1
+    original_topic=readings retry_count=1
+```
+
+### `merge`
+
+Republish every record onto the first retry tier, once the fix has shipped:
+
+```go
+for _, r := range drain(dlqTopic) {
+	// Drop the retry count so a merged record gets every tier again, not one
+	// attempt at the tier it died on. The original_* and first_failed_at
+	// headers stay: they still say where it came from and since when.
+	headers := slices.DeleteFunc(r.Headers, func(h kgo.RecordHeader) bool {
+		return h.Key == retryCountHeader || h.Key == errorHeader
+	})
+	producer.ProduceSync(ctx, &kgo.Record{Topic: retryTopic(1), Key: r.Key, Value: r.Value, Headers: headers})
+}
+```
+
+- **retry.1, not the live topic** (Uber's choice): records that already failed don't compete with live traffic, and if they fail again they walk the ladder and come back to the DLQ instead of looping.
+- **Same key**, so each record lands on the same partition as the rest of its key's history.
+- It only waits the retry.1 delay (1s here) before the retry.1 consumer handles it: `rec.Timestamp` is the merge time.
+- **Nothing is removed from the DLQ.** The records are now in two places, which is why the next step is `purge`.
+
+### `purge`
+
+Delete everything in the DLQ up to what you just looked at:
+
+```go
+ends, _ := adm.ListEndOffsets(ctx, dlqTopic)
+adm.DeleteRecords(ctx, ends.Offsets()) // every partition: delete everything before its current end
+```
+
+- Kafka can't delete one record in the middle of a log. `DeleteRecords` (the `kafka-delete-records.sh` CLI) **moves the log start offset** forward: everything before it becomes unreadable, and the segment files are removed later, in the background.
+- The line is drawn at the end offsets **read at purge time**. A record that lands in the DLQ after that point survives. Purge clears what you looked at, not what arrived while you were deciding.
+- **The gap between merge and purge.** A failure that lands in the DLQ _after_ the merge read it but _before_ the purge is below the purge line: it's deleted without ever being merged. The safe version reads the end offsets once, merges up to them, and purges up to those same offsets. The lab reads them again at purge time, for simplicity.
 
 ### Expected results
 
