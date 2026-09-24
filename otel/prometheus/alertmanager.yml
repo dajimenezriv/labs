@@ -1,24 +1,7 @@
-# Stock defaults are group_wait 30s, group_interval 5m, repeat_interval 4h.
-# Scaled down so the lab runs in seconds.
 route:
-  receiver: ticket
-  group_by: [alertname, job]
+  receiver: pager
   group_wait: 1s
-  group_interval: 5s
-  repeat_interval: 1m
-  routes:
-    - matchers: [severity="page"]
-      receiver: pager
-
-# While ServiceDown fires, other alerts for the same job are muted. Muted
-# includes their "resolved": it is dropped, not delayed (scenario 4).
-inhibit_rules:
-  - source_matchers: [alertname="ServiceDown"]
-    target_matchers: [alertname!="ServiceDown"]
-    equal: [job]
 
 receivers:
   - name: pager
-    webhook_configs: [{ url: http://app:8000/pager }]
-  - name: ticket
-    webhook_configs: [{ url: http://app:8000/ticket }]
+    webhook_configs: [{ url: http://app:8000/ }]

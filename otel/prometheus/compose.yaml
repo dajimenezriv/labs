@@ -11,7 +11,6 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./rules.yml:/etc/prometheus/rules.yml:ro
-      - ./rules_test.yml:/etc/prometheus/rules_test.yml:ro
 
   alertmanager:
     image: prom/alertmanager:v0.31.0

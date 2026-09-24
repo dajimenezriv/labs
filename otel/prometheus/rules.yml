@@ -2,9 +2,5 @@ groups:
   - name: lab
     rules:
       - alert: ConsumerLagHigh
-        expr: max by (job, group, topic, partition) (kafka_consumer_lag) > 1000
+        expr: kafka_consumer_lag > 1000
         for: 3s
-        labels:
-          severity: page
-        annotations:
-          summary: "{{ $labels.group }} is {{ $value }} behind on partition {{ $labels.partition }}"
