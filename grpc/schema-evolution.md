@@ -2,7 +2,6 @@
 
 - [1. Protobuf fails silently](#1-protobuf-fails-silently)
 - [2. The fix: reserved and safe evolution rules](#2-the-fix-reserved-and-safe-evolution-rules)
-  - [Deploy order](#deploy-order)
 - [3. buf breaking in CI](#3-buf-breaking-in-ci)
   - [Expected results](#expected-results)
 - [Interview answers](#interview-answers)
@@ -52,46 +51,14 @@ enum Severity {
 }
 
 message Alert {
-  reserved 6;
-  reserved "note";
+  reserved 1;
+  reserved "id";
 
-  int32 id = 1;                                   // widened later, readers first
-  string sensor_id = 2;                           // not renamed
-  double value = 3;                               // type unchanged
-  Severity severity = 4;
-  int64 created_at_ms = 5 [deprecated = true];    // still written until no reader uses it
-  google.protobuf.Timestamp created_at = 7;
-  int64 acked_by = 8;                             // new number
-  string unit = 9;                                // what the string value was for
+  // First [deprecated = true], then remove and reserve.
+  // A lint warning in Go.
+  string uuid = 2 [deprecated = true];
 }
 ```
-
-The rules:
-
-| you want to...            | don't                                  | do                                                                                                                |
-| ------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| remove a field            | delete the line                        | delete it and `reserved N; reserved "name";`                                                                      |
-| change what a field means | reuse its number                       | new number, `[deprecated = true]` on the old one, write both until every reader moved, then remove and reserve    |
-| change a field's type     | edit the type                          | same as above: a new field                                                                                        |
-| widen int32 → int64       | ship the writer first                  | ship every reader first; writers emit values > 2^31 − 1 only after                                                |
-| rename a field            | rename it if JSON or FieldMask is used | keep the name. `json_name = "sensorId"` keeps the JSON key, but `sensor_id` input and FieldMask paths still break |
-| add an enum value         | emit it right away                     | readers get a `default` that fails safe; ship readers; then emit                                                  |
-| add a field               | —                                      | always safe with a new number                                                                                     |
-
-### Deploy order
-
-**Whoever reads the change ships first.**
-
-| change is in... | reader   | ships first |
-| --------------- | -------- | ----------- |
-| a request       | server   | server      |
-| a response      | client   | clients     |
-| a Kafka record  | consumer | consumers   |
-
-- For responses, "clients first" may mean never: mobile apps and other teams don't upgrade on your schedule. Then the old field stays populated until the minimum supported client version stops reading it.
-- `[deprecated = true]` only marks the generated getter deprecated (a lint warning in Go). It doesn't change the wire.
-
-**`reserved` stops the one change that can't be detected at runtime. The deploy order handles the rest.**
 
 ## 3. buf breaking in CI
 
@@ -104,7 +71,7 @@ modules:
   - path: proto
 breaking:
   use:
-    - WIRE_JSON
+    - PACKAGE # the one we used at Kurita
 ```
 
 ```yaml
@@ -134,14 +101,14 @@ proto/alerts/v1/alerts.proto:15:3:Field "3" with name "value" on message "Alert"
 proto/alerts/v1/alerts.proto:17:9:Field "5" on message "Alert" changed name from "created_at_ms" to "acked_by".
 ```
 
-Categories, from strictest to loosest (in Go we will use `PACKAGE`):
+Categories, from strictest to loosest:
 
-| category    | protects                                                         | use it when                                    |
-| ----------- | ---------------------------------------------------------------- | ---------------------------------------------- |
-| `FILE`      | generated code, per file (buf's v2 default)                      | you publish the generated code as a library    |
-| `PACKAGE`   | generated code, per package (moving types between files is fine) | same, with freedom to move types               |
-| `WIRE_JSON` | binary and JSON encoding                                         | the service has JSON clients or uses FieldMask |
-| `WIRE`      | binary encoding only                                             | binary only, and every consumer regenerates    |
+| category    | protects                                    | use it when                                 |
+| ----------- | ------------------------------------------- | ------------------------------------------- |
+| `FILE`      | generated code, per file (buf's v2 default) | you publish the generated code as a library |
+| `PACKAGE`   | generated code, per package                 | same, with freedom to move types            |
+| `WIRE_JSON` | binary and JSON encoding                    | the service has JSON clients                |
+| `WIRE`      | binary encoding only                        | binary only, and every consumer regenerates |
 
 ### Expected results
 
@@ -156,15 +123,13 @@ Categories, from strictest to loosest (in Go we will use `PACKAGE`):
 | add `SEVERITY_CRITICAL`               |     passes     |   passes    | passes |
 | fixed v2 (section 7)                  | ✗ (the delete) |   passes    | passes |
 
-**buf breaking catches schema changes. It can't catch deploy order or reader code, so it's a CI gate, not a proof of compatibility.**
-
 ## Interview answers
 
 **"How do you evolve a protobuf schema safely?"**
 Only add fields, with new numbers. Never reuse a number: delete the field and `reserved` both the number and the name. To change a field's type or meaning, add a new field, write both until every reader has moved, then delete the old one and reserve it. `buf breaking` runs in CI against main to enforce it.
 
 **"What's the most dangerous change?"**
-Reusing a field number with the same wire type. Readers decode it as the old field with no error, in both directions.
+Reusing a field number with the same wire type. Readers decode it as the old field with no error.
 
 **"Why doesn't protobuf error on a mismatch?"**
 Tolerance is the design goal. A field number the reader doesn't know, or one with the wrong wire type, becomes an unknown field and the value is left at zero. proto3 doesn't send zero values, so "missing" and "default" look the same.
