@@ -31,13 +31,13 @@ message Alert {
 ```
 
 ```
-08 80 bc c1 96 0b    field 1 VARINT  id = 3000000000
-12 04 73 2d 31 37    field 2 LEN 4   "s-17"
-# Add the value example
-20 03                field 4 VARINT  severity = 3
+08 80 bc c1 96 0b             field 1 VARINT  id = 3000000000
+12 04 73 2d 31 37             field 2 LEN 4   "s-17"
+19 66 66 66 66 66 66 35 40    field 3 I64     value = 21.4
+20 02                         field 4 VARINT  severity = 2
 ```
 
-- A reused number with different wire type or missing field is set to `nil`.
+- A field the reader doesn't know, or a reused number with a different wire type, is kept as an unknown field and reads as the zero value (`0`, `""`, the enum's first value). No error.
 - A reused number with the same wire type is undetectable at runtime. It's the one change that corrupts data in both directions.
 
 ## 2. The fix: reserved and safe evolution rules
@@ -56,7 +56,10 @@ message Alert {
 
   // First [deprecated = true], then remove and reserve.
   // A lint warning in Go.
-  string uuid = 2 [deprecated = true];
+  string device_id = 2 [deprecated = true];
+  double value = 3;
+  Severity severity = 4;
+  string uuid = 5;
 }
 ```
 
@@ -88,17 +91,6 @@ jobs:
           curl -sSL https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86_64 -o buf
           chmod +x buf
           ./buf breaking --against '.git#ref=origin/main'
-```
-
-```
-$ buf breaking --against '.git#ref=origin/main'
-
-proto/alerts/v1/alerts.proto:12:1:Previously present field "6" with name "note" on message "Alert" was deleted without reserving the name "note".
-proto/alerts/v1/alerts.proto:12:1:Previously present field "6" with name "note" on message "Alert" was deleted without reserving the number "6".
-proto/alerts/v1/alerts.proto:13:3:Field "1" with name "id" on message "Alert" changed type from "int32" to "int64".
-proto/alerts/v1/alerts.proto:14:10:Field "2" on message "Alert" changed name from "sensor_id" to "device_id".
-proto/alerts/v1/alerts.proto:15:3:Field "3" with name "value" on message "Alert" changed type from "double" to "string".
-proto/alerts/v1/alerts.proto:17:9:Field "5" on message "Alert" changed name from "created_at_ms" to "acked_by".
 ```
 
 Categories, from strictest to loosest:
