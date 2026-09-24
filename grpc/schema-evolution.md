@@ -2,21 +2,10 @@
 
 - [The setup](#the-setup)
 - [1. Why protobuf fails silently](#1-why-protobuf-fails-silently)
-  - [Two directions](#two-directions)
-- [2. Reusing a field number](#2-reusing-a-field-number)
-  - [Expected results](#expected-results)
-- [3. Changing a field type](#3-changing-a-field-type)
-  - [Expected results](#expected-results-1)
-- [4. Renaming a field](#4-renaming-a-field)
-  - [Expected results](#expected-results-2)
-- [5. Removing a field](#5-removing-a-field)
-  - [Expected results](#expected-results-3)
-- [6. Adding an enum value](#6-adding-an-enum-value)
-  - [Expected results](#expected-results-4)
 - [7. The fix: reserved and safe evolution rules](#7-the-fix-reserved-and-safe-evolution-rules)
   - [Deploy order](#deploy-order)
 - [8. buf breaking in CI](#8-buf-breaking-in-ci)
-  - [Expected results](#expected-results-5)
+  - [Expected results](#expected-results)
 - [Interview answers](#interview-answers)
 
 ## The setup
@@ -47,28 +36,7 @@ message Alert {
 }
 ```
 
-```proto
-// v2
-enum Severity {
-  SEVERITY_UNSPECIFIED = 0;
-  SEVERITY_LOW = 1;
-  SEVERITY_HIGH = 2;
-  SEVERITY_CRITICAL = 3;     // new value
-}
-
-message Alert {
-  int64 id = 1;              // widened: ids passed 2^31
-  string device_id = 2;      // renamed
-  string value = 3;          // "21.4", so it can carry text
-  Severity severity = 4;
-  int64 acked_by = 5;        // created_at_ms moved elsewhere, number reused
-                             // note deleted
-}
-```
-
 ## 1. Why protobuf fails silently
-
-**Names are not on the wire. Only field numbers and a 3-bit wire type are.** Each field is `tag, value`, where `tag = field_number << 3 | wire_type`:
 
 | wire type | id  | used by                                                  |
 | --------- | --- | -------------------------------------------------------- |
@@ -77,222 +45,30 @@ message Alert {
 | LEN       | 2   | string, bytes, embedded messages, packed repeated        |
 | I32       | 5   | float, fixed32, sfixed32                                 |
 
-The v2 server's alert, byte by byte:
+```proto
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_LOW = 1;
+  SEVERITY_HIGH = 2;
+}
+
+message Alert {
+  int64 id = 1;
+  string device_id = 2;
+  double value = 3;
+  Severity severity = 4;
+}
+```
 
 ```
 08 80 bc c1 96 0b    field 1 VARINT  id = 3000000000
 12 04 73 2d 31 37    field 2 LEN 4   "s-17"
-1a 04 32 31 2e 34    field 3 LEN 4   "21.4"
+# Add the value example
 20 03                field 4 VARINT  severity = 3
-28 2a                field 5 VARINT  acked_by = 42
 ```
 
-What a reader does with each field:
-
-| the reader's schema has...      | what happens                                                     |
-| ------------------------------- | ---------------------------------------------------------------- |
-| no such number                  | kept as an **unknown field**, value unset (zero)                 |
-| the number, same wire type      | decoded **as the reader's type**, whatever the writer meant      |
-| the number, different wire type | protobuf-go: kept as an **unknown field**, value unset. No error |
-
-- `proto.Unmarshal` returns `nil` in all three rows. Protobuf was designed so old and new code can read each other's messages; the price is that "I don't understand this" and "this is empty" look the same.
-- proto3 doesn't send zero values, so "field is 0" and "field was never sent" are the same bytes.
-- Unknown fields are preserved on re-encode (proto3 dropped them in 3.0–3.4, restored in 3.5). A proxy that decodes and re-encodes passes them through. Code that copies known fields into a struct or a DB row drops them.
-
-### Two directions
-
-|                         | reader     | writer     | in gRPC                                    |
-| ----------------------- | ---------- | ---------- | ------------------------------------------ |
-| **backward compatible** | new schema | old schema | new server reading an old client's request |
-| **forward compatible**  | old schema | new schema | old client reading a new server's response |
-
-A rolling deploy needs both. So does anything stored: a Kafka topic or a cache written by v1 is read by v2 for as long as it's retained.
-
-## 2. Reusing a field number
-
-v2 moved `created_at_ms` to a new field and gave number 5 to `acked_by`. Both are `int64`, so the wire type matches and every reader decodes without complaint:
-
-```go
-var a alertsv1.Alert // old client
-proto.Unmarshal(resp, &a)
-time.UnixMilli(a.CreatedAtMs).UTC() // 1970-01-01T00:00:00.042Z
-```
-
-The other direction is worse. An old client's `CreateAlert` carries `created_at_ms = 1790240400000`, and the new server stores it as `acked_by`. The alert is **born acknowledged**, by a user id that doesn't exist, and the pager skips acknowledged alerts.
-
-### Expected results
-
-| direction                | on the wire                     | reader sees                                     | error |
-| ------------------------ | ------------------------------- | ----------------------------------------------- | ----- |
-| new → old, acked alert   | `acked_by = 42`                 | `created_at_ms = 42` → 1970-01-01T00:00:00.042Z | none  |
-| new → old, unacked alert | nothing (zero isn't sent)       | `created_at_ms = 0` → 1970-01-01T00:00:00Z      | none  |
-| old → new, `CreateAlert` | `created_at_ms = 1790240400000` | `acked_by = 1790240400000`                      | none  |
-
-- **1000/1000** alerts show a 1970 timestamp in the old dashboard (500 at +42ms, 500 at +0ms).
-- **100/100** alerts created by old clients are stored acknowledged: **0 pages** for them.
-- Nothing logs, nothing errors. It's found when someone asks why an alert from last night says 1970.
-
-**A reused number with the same wire type is undetectable at runtime. It's the one change that corrupts data in both directions.**
-
-## 3. Changing a field type
-
-Two changes, two different failures.
-
-**`double value` → `string value`.** I64 became LEN. The old reader finds field 3 with the wrong wire type and files it as unknown:
-
-```
-old client decodes: value=0  unknown=1a 04 32 31 2e 34   err=<nil>
-```
-
-The new server reading an old client's `double` does the same in reverse: `value = ""`, 8 bytes in unknown fields.
-
-**`int32 id` → `int64 id`.** Both VARINT. The protobuf docs list int32/int64 as compatible, and they are, until a value doesn't fit. The old reader keeps the low 32 bits, as a C++ cast would:
-
-```
-3,000,000,001 − 2^32 = 3,000,000,001 − 4,294,967,296 = −1,294,967,295
-```
-
-The id is still unique (it's a bijection), so a map keyed by id works and nothing looks wrong until the id goes back to the server. The old client re-encodes it as a negative int32 (a 10-byte varint, sign-extended), and the new server reads `int64 −1294967295`. `AckAlert` returns `NOT_FOUND`.
-
-The change is latent: with ids under 2^31 every test passes. It breaks the day the sequence crosses the boundary.
-
-Common type changes and what an old reader sees:
-
-| change          | wire types      | old reader sees                                                              |
-| --------------- | --------------- | ---------------------------------------------------------------------------- |
-| int32 → int64   | VARINT → VARINT | correct under 2^31, low 32 bits above                                        |
-| int32 → uint32  | VARINT → VARINT | negative values become large positive ones                                   |
-| int32 → sint32  | VARINT → VARINT | zigzag: an old `5` is decoded as `−3`                                        |
-| double → float  | I64 → I32       | unknown field, `0`                                                           |
-| double → string | I64 → LEN       | unknown field, `0`                                                           |
-| string ↔ bytes  | LEN → LEN       | fine while bytes are valid UTF-8; otherwise the whole message fails to parse |
-| bytes ↔ message | LEN → LEN       | fine if the bytes are that message's encoding                                |
-
-### Expected results
-
-| field   | direction                  |  affected | reader sees                    | error       |
-| ------- | -------------------------- | --------: | ------------------------------ | ----------- |
-| `value` | new → old                  | 1000/1000 | `0`                            | none        |
-| `value` | old → new (`CreateAlert`)  |   100/100 | `""`                           | none        |
-| `id`    | new → old                  | 1000/1000 | −1,294,967,295..−1,294,966,296 | none        |
-| `id`    | old → new (`AckAlert(id)`) | 1000/1000 | negative id                    | `NOT_FOUND` |
-
-- Wire type changes zero the field. Same-wire-type changes reinterpret it. Neither returns an error at decode time.
-- The only loud failure is the round trip, and it's loud far from the cause.
-
-**A type change is either a different wire type (the value disappears) or the same wire type with a different meaning (the value lies).**
-
-## 4. Renaming a field
-
-`sensor_id` → `device_id`. Binary: **nothing happens**. Field 2 is still a LEN string.
-
-JSON is different, because protojson puts names on the wire. The JSON name is the lowerCamelCase of the field name (`sensorId`), and protojson also accepts the original name (`sensor_id`) on input. An old JSON client sends:
-
-```json
-{
-  "id": 7,
-  "sensorId": "s-17",
-  "value": 21.4,
-  "severity": "SEVERITY_HIGH",
-  "createdAtMs": "1790240400000",
-  "note": "fan noisy"
-}
-```
-
-```go
-protojson.Unmarshal(body, &alert)
-// proto: (line 1:9): unknown field "sensorId"
-```
-
-- Default `protojson.UnmarshalOptions` has `DiscardUnknown: false`, so that's an error. That's the good outcome.
-- grpc-gateway v2's default marshaler sets `DiscardUnknown: true`. The request succeeds and `device_id` is `""`.
-- `FieldMask` paths (`update_mask: "sensor_id"`) are field names too. They stop matching.
-- Generated code: `a.SensorId` no longer exists, so a client that regenerates fails to compile. That's loud and harmless.
-
-### Expected results
-
-| client                | transport | result for 100 old-client creates                   |
-| --------------------- | --------- | --------------------------------------------------- |
-| grpc-go               | binary    | 100/100 correct                                     |
-| protojson defaults    | JSON      | 100/100 `InvalidArgument: unknown field "sensorId"` |
-| grpc-gateway defaults | JSON      | 100/100 accepted, `device_id = ""`                  |
-
-**A rename is wire-safe and JSON-breaking. Whether it's safe depends on whether anything speaks JSON or FieldMask to the service.**
-
-## 5. Removing a field
-
-v2 deleted `note = 6`. An old client still sends it:
-
-```
-new server decodes: unknown=… 32 09 66 61 6e 20 6e 6f 69 73 79   ("fan noisy", field 6)
-```
-
-The bytes survive in the message's unknown fields, but the handler builds a DB row from known fields:
-
-```go
-func (s *server) CreateAlert(ctx context.Context, req *alertsv1.CreateAlertRequest) (*alertsv1.Alert, error) {
-	a := req.GetAlert()
-	id, err := s.q.InsertAlert(ctx, db.InsertAlertParams{
-		DeviceID: a.GetDeviceId(),
-		Value:    a.GetValue(),
-		Severity: int32(a.GetSeverity()),
-	}) // unknown fields are not a column
-	...
-}
-```
-
-When the old client reads it back, `note` isn't sent, so it decodes as `""`.
-
-The removal alone loses data only from clients that still send the field. The real damage comes later: number 6 now looks free, and the next person who adds a field takes it. That's section 2.
-
-### Expected results
-
-| step                     |      notes |
-| ------------------------ | ---------: |
-| old clients send         |        100 |
-| stored by the new server |          0 |
-| read back by old clients | 100 × `""` |
-
-**Deleting a field is safe. Deleting it without reserving its number sets up the next reuse.**
-
-## 6. Adding an enum value
-
-v2 adds `SEVERITY_CRITICAL = 3`. proto3 enums are **open**: an unknown value is kept as its number. protobuf-go gives the old client `Severity(3)`, and `String()` prints `"3"`. The paging code was written when there were two severities:
-
-```go
-switch a.GetSeverity() {
-case alertsv1.Severity_SEVERITY_HIGH:
-	page(a)
-case alertsv1.Severity_SEVERITY_LOW:
-	ticket(a)
-}
-// Severity(3) matches neither: no page, no ticket, no log.
-```
-
-Other runtimes:
-
-| runtime                          | unknown value 3 becomes                                      |
-| -------------------------------- | ------------------------------------------------------------ |
-| Go, proto3 (open enum)           | `Severity(3)`                                                |
-| Java, proto3                     | `getSeverity()` = `UNRECOGNIZED`, `getSeverityValue()` = 3   |
-| proto2 / editions `CLOSED` enum  | moved to unknown fields; getter returns the first value (0)  |
-| protojson defaults               | `invalid value for enum field severity: "SEVERITY_CRITICAL"` |
-| protojson `DiscardUnknown: true` | field left unset: `SEVERITY_UNSPECIFIED`                     |
-
-- In JSON the server sends the enum as its name, `"SEVERITY_CRITICAL"`. An old protojson client fails to decode **the whole response**, so one CRITICAL alert breaks a `ListAlerts` page.
-- This is why the zero value should be `_UNSPECIFIED`: when the value is lost, it falls back to "unknown", not to a real severity like LOW.
-
-### Expected results
-
-| client                     | pages | should page |                                   missed |
-| -------------------------- | ----: | ----------: | ---------------------------------------: |
-| v1, binary                 |   200 |         300 |                                      100 |
-| v1, JSON via gateway       |   200 |         300 |                   100 (as `UNSPECIFIED`) |
-| v1, JSON protojson default |     — |         300 | responses with a CRITICAL fail to decode |
-
-- 700 LOW + 200 HIGH + 100 CRITICAL. The old client handles 900 and silently ignores the 100 most important ones.
-
-**Adding an enum value is a wire-compatible change that is a behavior-breaking one. No schema tool can catch it: the fix is in the reader's code.**
+- A reused number with different wire type or missing field is set to `nil`.
+- A reused number with the same wire type is undetectable at runtime. It's the one change that corrupts data in both directions.
 
 ## 7. The fix: reserved and safe evolution rules
 
