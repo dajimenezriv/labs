@@ -27,7 +27,7 @@ func run(m *testing.M) int {
 		postgres.WithDatabase("db"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
-		postgres.WithInitScripts("./migrations/000001_init.up.sql"),
+		postgres.WithInitScripts("migrations/*.up.sql"),
 		postgres.BasicWaitStrategies())
 	defer testcontainers.TerminateContainer(ctr)
 	if err != nil {
@@ -52,6 +52,7 @@ func run(m *testing.M) int {
 }
 
 func setup(t *testing.T) *db.Queries {
+	t.Helper()
 	t.Cleanup(func() {
 		_, err := pool.Exec(context.Background(), "TRUNCATE sites RESTART IDENTITY CASCADE")
 		if err != nil {
