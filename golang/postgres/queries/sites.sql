@@ -4,7 +4,7 @@ INSERT INTO
 VALUES
   (@name) RETURNING *;
 
--- name: GetSites :one
+-- name: GetSites :many
 SELECT
   *
 FROM

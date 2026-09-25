@@ -23,16 +23,29 @@ func (q *Queries) CreateSite(ctx context.Context, name string) (Site, error) {
 	return i, err
 }
 
-const getSites = `-- name: GetSites :one
+const getSites = `-- name: GetSites :many
 SELECT
   id, name
 FROM
   sites
 `
 
-func (q *Queries) GetSites(ctx context.Context) (Site, error) {
-	row := q.db.QueryRow(ctx, getSites)
-	var i Site
-	err := row.Scan(&i.ID, &i.Name)
-	return i, err
+func (q *Queries) GetSites(ctx context.Context) ([]Site, error) {
+	rows, err := q.db.Query(ctx, getSites)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Site
+	for rows.Next() {
+		var i Site
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

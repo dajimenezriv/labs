@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"postgres/db"
 	"testing"
 
@@ -22,12 +21,12 @@ func TestQueries(t *testing.T) {
 		postgres.BasicWaitStrategies())
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("postgres run: %v", err)
 	}
 
 	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("connection string: %v", err)
 	}
 
 	pool, err := pgxpool.New(ctx, dsn)
@@ -38,5 +37,18 @@ func TestQueries(t *testing.T) {
 
 	queries := db.New(pool)
 	site, err := queries.CreateSite(t.Context(), "Site")
-	fmt.Println(site, err)
+	if err != nil {
+		t.Fatalf("create site error: %v", err)
+	}
+	if got := site.ID; got != 1 {
+		t.Errorf("siteID = %d, want %d", got, 1)
+	}
+
+	sites, err := queries.GetSites(t.Context())
+	if err != nil {
+		t.Fatalf("get sites error: %v", err)
+	}
+	if got, want := len(sites), 1; got != want {
+		t.Errorf("len sites = %d, want %d", got, want)
+	}
 }
