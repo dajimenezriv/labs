@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	brokers         = "localhost:29092"
-	databaseURL     = "postgresql://postgres:postgres@localhost:5555/db?sslmode=disable"
-	outboxBatchSize = 100
-	outboxInterval  = time.Second
-	topic           = "alerts"
-	eventTypeHeader = "event_type"
+	brokers           = "localhost:29092"
+	databaseURL       = "postgresql://postgres:postgres@localhost:5555/db?sslmode=disable"
+	outboxBatchSize   = 100
+	outboxInterval    = time.Second
+	topic             = "alerts"
+	partitions        = 3
+	replicationFactor = -1
+	eventTypeHeader   = "event_type"
 )
 
 type alert struct {
@@ -41,6 +43,19 @@ func main() {
 		panic("pool ping: " + err.Error())
 	}
 	defer pool.Close()
+
+	client, err := kgo.NewClient(kgo.SeedBrokers(brokers))
+	if err != nil {
+		panic("new kafka client: " + err.Error())
+	}
+	defer client.Close()
+
+	admin := kadm.NewClient(client)
+
+	if _, err := admin.CreateTopic(ctx, partitions, replicationFactor, nil, topic); err != nil &&
+		!errors.Is(err, kerr.TopicAlreadyExists) {
+		panic("create topic: " + err.Error())
+	}
 
 	producer, err := kgo.NewClient(kgo.SeedBrokers(brokers))
 	if err != nil {
@@ -64,23 +79,6 @@ func main() {
 	}); err != nil {
 		panic("create outbox event: " + err.Error())
 	}
-}
-
-func ensureTopic(ctx context.Context, brokers []string, topic string, partitions int32) error {
-	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
-	if err != nil {
-		return fmt.Errorf("new kafka client: %w", err)
-	}
-	defer client.Close()
-
-	admin := kadm.NewClient(client)
-
-	if _, err := admin.CreateTopic(ctx, partitions, -1, nil, topic); err != nil &&
-		!errors.Is(err, kerr.TopicAlreadyExists) {
-		return fmt.Errorf("create topic %s: %w", topic, err)
-	}
-
-	return nil
 }
 
 type relay struct {
