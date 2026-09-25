@@ -9,3 +9,11 @@ SELECT
   *
 FROM
   sites;
+
+-- name: GetSiteById :one
+SELECT
+  *
+FROM
+  sites
+WHERE
+  id = @id;

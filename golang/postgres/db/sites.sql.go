@@ -23,6 +23,22 @@ func (q *Queries) CreateSite(ctx context.Context, name string) (Site, error) {
 	return i, err
 }
 
+const getSiteById = `-- name: GetSiteById :one
+SELECT
+  id, name
+FROM
+  sites
+WHERE
+  id = $1
+`
+
+func (q *Queries) GetSiteById(ctx context.Context, id int64) (Site, error) {
+	row := q.db.QueryRow(ctx, getSiteById, id)
+	var i Site
+	err := row.Scan(&i.ID, &i.Name)
+	return i, err
+}
+
 const getSites = `-- name: GetSites :many
 SELECT
   id, name

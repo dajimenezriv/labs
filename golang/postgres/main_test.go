@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"postgres/db"
 	"testing"
 
@@ -10,7 +11,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-func TestQueries(t *testing.T) {
+var pool *pgxpool.Pool
+
+func TestMain(m *testing.M) {
 	ctx := context.Background()
 
 	ctr, err := postgres.Run(ctx, "postgres:18-alpine",
@@ -19,23 +22,37 @@ func TestQueries(t *testing.T) {
 		postgres.WithPassword("postgres"),
 		postgres.WithInitScripts("./migrations/000001_init.up.sql"),
 		postgres.BasicWaitStrategies())
-	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
-		t.Fatalf("postgres run: %v", err)
+		log.Fatalf("postgres run: %v", err)
 	}
+	defer testcontainers.TerminateContainer(ctr)
 
 	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		t.Fatalf("connection string: %v", err)
+		log.Fatalf("connection string: %v", err)
 	}
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		t.Fatalf("new pool: %v", err)
+		log.Fatalf("new pool: %v", err)
 	}
 	defer pool.Close()
 
-	queries := db.New(pool)
+	m.Run()
+}
+
+func setup(t *testing.T) *db.Queries {
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.Background(), "TRUNCATE sites RESTART IDENTITY CASCADE")
+		if err != nil {
+			t.Fatalf("truncate: %v", err)
+		}
+	})
+	return db.New(pool)
+}
+
+func TestGetSites(t *testing.T) {
+	queries := setup(t)
 	site, err := queries.CreateSite(t.Context(), "Site")
 	if err != nil {
 		t.Fatalf("create site error: %v", err)
@@ -50,5 +67,24 @@ func TestQueries(t *testing.T) {
 	}
 	if got, want := len(sites), 1; got != want {
 		t.Errorf("len sites = %d, want %d", got, want)
+	}
+}
+
+func TestGetSiteByID(t *testing.T) {
+	queries := setup(t)
+	site, err := queries.CreateSite(t.Context(), "Site")
+	if err != nil {
+		t.Fatalf("create site error: %v", err)
+	}
+	if got := site.ID; got != 1 {
+		t.Errorf("siteID = %d, want %d", got, 1)
+	}
+
+	site, err = queries.GetSiteById(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("get site by id error: %v", err)
+	}
+	if got, want := site.Name, "Site"; got != want {
+		t.Errorf("len sites = %s, want %s", got, want)
 	}
 }
