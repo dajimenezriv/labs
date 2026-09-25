@@ -1,0 +1,10 @@
+version: "3"
+
+tasks:
+  run: go run .
+
+  squawk: squawk 'migrations/*.sql'
+
+  sqlc:
+    - sqlc generate -f sqlc.yaml
+    - sqlc vet -f sqlc.yaml

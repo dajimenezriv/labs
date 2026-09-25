@@ -58,7 +58,7 @@ docker compose kill -s SIGKILL kafka1
 
 ```bash
 # Use the kafka-topics tool to create or delete a topic.
-docker compose exec kafka1 /opt/kafka/bin/kafka-topics.sh
+docker compose exec kafka1 /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server kafka1:9092 \
   --create \
   --topic seq \

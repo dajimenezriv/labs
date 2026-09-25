@@ -1,0 +1,168 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"kafka/db"
+	"log/slog"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+const (
+	brokers         = "localhost:29092"
+	databaseURL     = "postgresql://postgres:postgres@localhost:5555/db?sslmode=disable"
+	outboxBatchSize = 100
+	outboxInterval  = time.Second
+	topic           = "alerts"
+	eventTypeHeader = "event_type"
+)
+
+type alert struct {
+	SensorID string  `json:"sensor_id"`
+	Value    float64 `json:"value"`
+}
+
+func main() {
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		panic("new pool: " + err.Error())
+	}
+	if err := pool.Ping(ctx); err != nil {
+		panic("pool ping: " + err.Error())
+	}
+	defer pool.Close()
+
+	producer, err := kgo.NewClient(kgo.SeedBrokers(brokers))
+	if err != nil {
+		panic("new kafka client: " + err.Error())
+	}
+	defer producer.Close()
+
+	payload, err := json.Marshal(alert{
+		SensorID: "deviceID+measurement",
+		Value:    10.2,
+	})
+	if err != nil {
+		panic("marshal: " + err.Error())
+	}
+
+	queries := db.New(pool)
+	if _, err := queries.CreateOutboxEvent(ctx, db.CreateOutboxEventParams{
+		PartitionKey: "sensorID",
+		EventType:    "sensor.reading.recorded",
+		Payload:      payload,
+	}); err != nil {
+		panic("create outbox event: " + err.Error())
+	}
+}
+
+func ensureTopic(ctx context.Context, brokers []string, topic string, partitions int32) error {
+	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		return fmt.Errorf("new kafka client: %w", err)
+	}
+	defer client.Close()
+
+	admin := kadm.NewClient(client)
+
+	if _, err := admin.CreateTopic(ctx, partitions, -1, nil, topic); err != nil &&
+		!errors.Is(err, kerr.TopicAlreadyExists) {
+		return fmt.Errorf("create topic %s: %w", topic, err)
+	}
+
+	return nil
+}
+
+type relay struct {
+	pool     *pgxpool.Pool
+	producer *kgo.Client
+}
+
+func (r *relay) run(ctx context.Context) {
+	ticker := time.NewTicker(outboxInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.InfoContext(ctx, "outbox relay stopped")
+			return
+		case <-ticker.C:
+			// A burst should not have to wait one tick per batch to drain.
+			for {
+				published, err := r.publishBatch(ctx)
+				if err != nil {
+					slog.ErrorContext(ctx, "publish outbox batch", "err", err)
+					break
+				}
+				if published < int(outboxBatchSize) {
+					break
+				}
+			}
+		}
+	}
+}
+
+func (r *relay) publishBatch(ctx context.Context) (int, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			slog.WarnContext(ctx, "rollback transaction", "err", err)
+		}
+	}()
+
+	queries := db.New(tx)
+	events, err := queries.GetOutboxEvents(ctx, outboxBatchSize)
+	if err != nil {
+		return 0, fmt.Errorf("get outbox events: %w", err)
+	}
+	if len(events) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]int64, len(events))
+	for _, e := range events {
+		// Get trace from outbox
+
+		headers := []kgo.RecordHeader{
+			{Key: eventTypeHeader, Value: []byte(e.EventType)},
+		}
+		// Add observability headers
+
+		if err := r.producer.ProduceSync(ctx, &kgo.Record{
+			Key:     []byte(e.PartitionKey),
+			Topic:   topic,
+			Value:   e.Payload,
+			Headers: headers,
+		}).FirstErr(); err != nil {
+			return 0, fmt.Errorf("publish event %d: %w", e.ID, err)
+		}
+
+		ids = append(ids, e.ID)
+	}
+
+	if _, err := tx.Exec(ctx, "UPDATE outbox SET published_at = now() WHERE id = ANY($1::bigint[])", ids); err != nil {
+		return 0, fmt.Errorf("mark published: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+
+	slog.InfoContext(ctx, "published outbox events", "count", len(ids))
+
+	return len(ids), nil
+}
