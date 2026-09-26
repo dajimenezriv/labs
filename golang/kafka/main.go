@@ -15,6 +15,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -36,6 +39,9 @@ type alert struct {
 
 func main() {
 	ctx := context.Background()
+
+	otel.SetTracerProvider(sdktrace.NewTracerProvider())
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -64,8 +70,7 @@ WHERE
   published_at IS NULL;
 
 COMMIT;
-	
-	`)
+`)
 
 	client, err := kgo.NewClient(kgo.SeedBrokers(brokers))
 	if err != nil {

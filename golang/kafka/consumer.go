@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 func runConsumer(ctx context.Context, client *kgo.Client) {
@@ -26,18 +30,26 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 		var handled []*kgo.Record
 		var failed bool
 
-		// 		Key:          string(r.Key),
-		// EventType:    header(r, EventTypeHeader),
-		// Value:        r.Value,
-		// RetryCount:   retryCount(r),
-		// TraceContext: traceContext,
-
 		fetches.EachRecord(func(r *kgo.Record) {
 			// Once one record in this batch fails, stop committing the rest:
 			// committing past it would skip it forever.
 			if failed {
 				return
 			}
+
+			traceContext := make(map[string]string, len(r.Headers))
+			for _, h := range r.Headers {
+				traceContext[h.Key] = string(h.Value)
+			}
+
+			handleCtx := extractTraceContext(ctx, traceContext)
+			spanName := fmt.Sprintf("consume %s", topic)
+			handleCtx, span := otel.Tracer(group).Start(handleCtx, spanName)
+			span.SetAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.destination.name", topic),
+				attribute.String("messaging.kafka.consumer.group", group),
+			)
 
 			slog.InfoContext(ctx, "consume event", "payload", string(r.Value))
 			handled = append(handled, r)
@@ -53,4 +65,8 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 			slog.ErrorContext(ctx, "commit records", "err", err)
 		}
 	}
+}
+
+func extractTraceContext(ctx context.Context, carrier map[string]string) context.Context {
+	return otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(carrier))
 }
