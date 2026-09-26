@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,7 +39,8 @@ type alert struct {
 }
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 	otel.SetTextMapPropagator(propagation.TraceContext{})
@@ -99,8 +101,10 @@ COMMIT;
 		panic("marshal: " + err.Error())
 	}
 
+	var wg sync.WaitGroup
+
 	r := relay{pool: pool, producer: producer}
-	go r.run(ctx)
+	wg.Go(func() { r.run(ctx) })
 
 	consumer, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers),
@@ -119,7 +123,7 @@ COMMIT;
 	}
 	defer consumer.Close()
 
-	go runConsumer(ctx, consumer)
+	wg.Go(func() { runConsumer(ctx, consumer) })
 
 	queries := db.New(pool)
 	if _, err := queries.CreateOutboxEvent(ctx, db.CreateOutboxEventParams{
@@ -130,9 +134,8 @@ COMMIT;
 		panic("create outbox event: " + err.Error())
 	}
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	<-ctx.Done()
+	slog.Info("shutting down")
 
-	slog.InfoContext(ctx, "shuting down")
+	wg.Wait()
 }

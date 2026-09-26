@@ -28,15 +28,8 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 		}
 
 		var handled []*kgo.Record
-		var failed bool
 
 		fetches.EachRecord(func(r *kgo.Record) {
-			// Once one record in this batch fails, stop committing the rest:
-			// committing past it would skip it forever.
-			if failed {
-				return
-			}
-
 			traceContext := make(map[string]string, len(r.Headers))
 			for _, h := range r.Headers {
 				traceContext[h.Key] = string(h.Value)
@@ -51,7 +44,9 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 				attribute.String("messaging.kafka.consumer.group", group),
 			)
 
-			slog.InfoContext(ctx, "consume event", "payload", string(r.Value))
+			slog.InfoContext(handleCtx, "consume event", "payload", string(r.Value))
+			span.End()
+
 			handled = append(handled, r)
 		})
 

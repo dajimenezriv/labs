@@ -65,7 +65,7 @@ func (r *relay) publishBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	ids := make([]int64, len(events))
+	ids := make([]int64, 0, len(events))
 	for _, e := range events {
 		// Get trace from outbox
 
