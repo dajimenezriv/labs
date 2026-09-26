@@ -22,7 +22,10 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 			// Fetch errors are usually transient (rebalance, broker restarting).
 			// Continue polling.
 			for _, e := range errs {
-				slog.ErrorContext(ctx, "kafka fetch", "topic", e.Topic, "partition", e.Partition, "err", e.Err)
+				slog.ErrorContext(ctx, "kafka fetch",
+					"topic", e.Topic,
+					"partition", e.Partition,
+					"err", e.Err)
 			}
 			continue
 		}
