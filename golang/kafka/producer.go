@@ -75,7 +75,7 @@ func (r *relay) publishBatch(ctx context.Context) (int, error) {
 		}
 
 		if err := r.producer.ProduceSync(ctx, &kgo.Record{
-			Key:     []byte(e.PartitionKey),
+			Key:     []byte(e.Key),
 			Topic:   topic,
 			Value:   e.Payload,
 			Headers: headers,

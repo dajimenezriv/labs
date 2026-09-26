@@ -12,8 +12,7 @@ import (
 const createOutboxEvent = `-- name: CreateOutboxEvent :one
 INSERT INTO
   outbox (
-    partition_key,
-    event_type,
+    key,
     payload,
     trace_context
   )
@@ -21,30 +20,22 @@ VALUES
   (
     $1,
     $2,
-    $3,
-    $4
-  ) RETURNING id, partition_key, event_type, payload, created_at, published_at, trace_context
+    $3
+  ) RETURNING id, key, payload, created_at, published_at, trace_context
 `
 
 type CreateOutboxEventParams struct {
-	PartitionKey string
-	EventType    string
+	Key          string
 	Payload      []byte
 	TraceContext []byte
 }
 
 func (q *Queries) CreateOutboxEvent(ctx context.Context, arg CreateOutboxEventParams) (Outbox, error) {
-	row := q.db.QueryRow(ctx, createOutboxEvent,
-		arg.PartitionKey,
-		arg.EventType,
-		arg.Payload,
-		arg.TraceContext,
-	)
+	row := q.db.QueryRow(ctx, createOutboxEvent, arg.Key, arg.Payload, arg.TraceContext)
 	var i Outbox
 	err := row.Scan(
 		&i.ID,
-		&i.PartitionKey,
-		&i.EventType,
+		&i.Key,
 		&i.Payload,
 		&i.CreatedAt,
 		&i.PublishedAt,
@@ -55,7 +46,7 @@ func (q *Queries) CreateOutboxEvent(ctx context.Context, arg CreateOutboxEventPa
 
 const getOutboxEvents = `-- name: GetOutboxEvents :many
 SELECT
-  id, partition_key, event_type, payload, created_at, published_at, trace_context
+  id, key, payload, created_at, published_at, trace_context
 FROM
   outbox
 WHERE
@@ -79,8 +70,7 @@ func (q *Queries) GetOutboxEvents(ctx context.Context, limit int32) ([]Outbox, e
 		var i Outbox
 		if err := rows.Scan(
 			&i.ID,
-			&i.PartitionKey,
-			&i.EventType,
+			&i.Key,
 			&i.Payload,
 			&i.CreatedAt,
 			&i.PublishedAt,

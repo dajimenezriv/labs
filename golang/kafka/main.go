@@ -30,7 +30,6 @@ const (
 	topic             = "alerts"
 	partitions        = 3
 	replicationFactor = -1
-	eventTypeHeader   = "event_type"
 )
 
 type alert struct {
@@ -94,7 +93,7 @@ COMMIT;
 	defer producer.Close()
 
 	payload, err := json.Marshal(alert{
-		SensorID: "deviceID+measurement",
+		SensorID: "sensorID",
 		Value:    10.2,
 	})
 	if err != nil {
@@ -127,9 +126,8 @@ COMMIT;
 
 	queries := db.New(pool)
 	if _, err := queries.CreateOutboxEvent(ctx, db.CreateOutboxEventParams{
-		PartitionKey: "sensorID",
-		EventType:    "sensor.reading.recorded",
-		Payload:      payload,
+		Key:     "sensorID",
+		Payload: payload,
 	}); err != nil {
 		panic("create outbox event: " + err.Error())
 	}

@@ -10,8 +10,7 @@ import (
 
 type Outbox struct {
 	ID           int64
-	PartitionKey string
-	EventType    string
+	Key          string
 	Payload      []byte
 	CreatedAt    pgtype.Timestamptz
 	PublishedAt  pgtype.Timestamptz

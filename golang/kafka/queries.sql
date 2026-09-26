@@ -1,15 +1,13 @@
 -- name: CreateOutboxEvent :one
 INSERT INTO
   outbox (
-    partition_key,
-    event_type,
+    key,
     payload,
     trace_context
   )
 VALUES
   (
-    @partition_key,
-    @event_type,
+    @key,
     @payload,
     @trace_context
   ) RETURNING *;
