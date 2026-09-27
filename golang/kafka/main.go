@@ -47,10 +47,6 @@ func main() {
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	spanCtx, span := otel.Tracer(serviceName).Start(ctx, "main")
-	defer span.End()
-	slog.InfoContext(spanCtx, "create span")
-
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		panic("new pool: " + err.Error())
@@ -108,6 +104,9 @@ func main() {
 
 	wg.Go(func() { runConsumer(ctx, consumer) })
 
+	spanCtx, span := otel.Tracer(serviceName).Start(ctx, "main")
+	slog.InfoContext(spanCtx, "create span")
+
 	queries := db.New(pool)
 	if _, err := queries.CreateOutboxEvent(ctx, db.CreateOutboxEventParams{
 		Key:          "sensorID",
@@ -116,6 +115,8 @@ func main() {
 	}); err != nil {
 		panic("create outbox event: " + err.Error())
 	}
+
+	span.End()
 
 	<-ctx.Done()
 	slog.Info("shutting down")
