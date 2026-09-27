@@ -56,24 +56,18 @@ func main() {
 	}
 	defer pool.Close()
 
-	client, err := kgo.NewClient(kgo.SeedBrokers(brokers))
-	if err != nil {
-		panic("new kafka client: " + err.Error())
-	}
-	defer client.Close()
-
-	admin := kadm.NewClient(client)
-
-	if _, err := admin.CreateTopic(ctx, partitions, replicationFactor, nil, topic); err != nil &&
-		!errors.Is(err, kerr.TopicAlreadyExists) {
-		panic("create topic: " + err.Error())
-	}
-
 	producer, err := kgo.NewClient(kgo.SeedBrokers(brokers))
 	if err != nil {
 		panic("new kafka producer: " + err.Error())
 	}
 	defer producer.Close()
+
+	admin := kadm.NewClient(producer)
+
+	if _, err := admin.CreateTopic(ctx, partitions, replicationFactor, nil, topic); err != nil &&
+		!errors.Is(err, kerr.TopicAlreadyExists) {
+		panic("create topic: " + err.Error())
+	}
 
 	payload, err := json.Marshal(alert{SensorID: "sensorID", Value: 10.2})
 	if err != nil {

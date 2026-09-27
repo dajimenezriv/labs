@@ -35,7 +35,7 @@ func (r *relay) run(ctx context.Context) {
 					slog.ErrorContext(ctx, "publish outbox batch", "err", err)
 					break
 				}
-				if published < int(outboxBatchSize) {
+				if published < outboxBatchSize {
 					break
 				}
 			}
