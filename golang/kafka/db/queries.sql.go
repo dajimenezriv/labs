@@ -85,3 +85,17 @@ func (q *Queries) GetOutboxEvents(ctx context.Context, limit int32) ([]Outbox, e
 	}
 	return items, nil
 }
+
+const markOutboxPublished = `-- name: MarkOutboxPublished :exec
+UPDATE
+  outbox
+SET
+  published_at = now()
+WHERE
+  id = ANY($1::bigint[])
+`
+
+func (q *Queries) MarkOutboxPublished(ctx context.Context, ids []int64) error {
+	_, err := q.db.Exec(ctx, markOutboxPublished, ids)
+	return err
+}

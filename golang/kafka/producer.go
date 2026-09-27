@@ -63,6 +63,7 @@ func (r *relay) publishBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	records := make([]*kgo.Record, 0, len(events))
 	ids := make([]int64, 0, len(events))
 	for _, e := range events {
 		traceCtx := contextFromJSON(ctx, e.TraceContext)
@@ -72,19 +73,20 @@ func (r *relay) publishBatch(ctx context.Context) (int, error) {
 			headers = append(headers, kgo.RecordHeader{Key: k, Value: []byte(v)})
 		}
 
-		if err := r.producer.ProduceSync(ctx, &kgo.Record{
+		records = append(records, &kgo.Record{
 			Key:     []byte(e.Key),
 			Topic:   topic,
 			Value:   e.Payload,
 			Headers: headers,
-		}).FirstErr(); err != nil {
-			return 0, fmt.Errorf("publish event %d: %w", e.ID, err)
-		}
-
+		})
 		ids = append(ids, e.ID)
 	}
 
-	if _, err := tx.Exec(ctx, "UPDATE outbox SET published_at = now() WHERE id = ANY($1::bigint[])", ids); err != nil {
+	if err := r.producer.ProduceSync(ctx, records...).FirstErr(); err != nil {
+		return 0, fmt.Errorf("publish events: %w", err)
+	}
+
+	if err := queries.MarkOutboxPublished(ctx, ids); err != nil {
 		return 0, fmt.Errorf("mark published: %w", err)
 	}
 

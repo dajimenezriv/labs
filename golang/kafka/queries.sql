@@ -25,3 +25,11 @@ LIMIT
   $1 FOR
 UPDATE
   SKIP LOCKED;
+
+-- name: MarkOutboxPublished :exec
+UPDATE
+  outbox
+SET
+  published_at = now()
+WHERE
+  id = ANY(@ids::bigint[]);
