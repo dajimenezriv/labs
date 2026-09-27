@@ -11,8 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 type relay struct {
@@ -67,10 +65,10 @@ func (r *relay) publishBatch(ctx context.Context) (int, error) {
 
 	ids := make([]int64, 0, len(events))
 	for _, e := range events {
-		// Get trace from outbox
+		traceCtx := contextFromJSON(ctx, e.TraceContext)
 
 		headers := []kgo.RecordHeader{}
-		for k, v := range injectTraceContext(ctx) {
+		for k, v := range injectTraceContext(traceCtx) {
 			headers = append(headers, kgo.RecordHeader{Key: k, Value: []byte(v)})
 		}
 
@@ -97,10 +95,4 @@ func (r *relay) publishBatch(ctx context.Context) (int, error) {
 	slog.InfoContext(ctx, "published outbox events", "count", len(ids))
 
 	return len(ids), nil
-}
-
-func injectTraceContext(ctx context.Context) map[string]string {
-	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	return carrier
 }
