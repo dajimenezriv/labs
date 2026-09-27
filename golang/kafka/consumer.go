@@ -15,16 +15,15 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 			return
 		}
 
-		if errs := fetches.Errors(); len(errs) > 0 {
-			// Fetch errors are usually transient (rebalance, broker restarting).
-			// Continue polling.
-			for _, e := range errs {
-				slog.ErrorContext(ctx, "kafka fetch",
-					"topic", e.Topic,
-					"partition", e.Partition,
-					"err", e.Err)
-			}
-			continue
+		// Fetch errors are usually transient (rebalance, broker restarting).
+		// Log them and still process the records: one poll can mix an error on
+		// one partition with records from others, and the read position has
+		// already moved past those records, so skipping them loses them.
+		for _, e := range fetches.Errors() {
+			slog.ErrorContext(ctx, "kafka fetch",
+				"topic", e.Topic,
+				"partition", e.Partition,
+				"err", e.Err)
 		}
 
 		var handled []*kgo.Record
