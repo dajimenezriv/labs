@@ -4,6 +4,7 @@
 - [What is protobuf?](#what-is-protobuf)
 - [How to update protobuf schema?](#how-to-update-protobuf-schema)
 - [How are errors handled?](#how-are-errors-handled)
+- [Observability](#observability)
 
 ## What is gRPC (Remote Procedure Call)?
 
@@ -57,3 +58,16 @@ message Data {
 - Tolerance is the design goal. There are no errors.
 - A field the reader doesn't know, or a reused number with a different wire type, reads as the zero value.
 - Zero value: `0`, `""`, the enum's first value.
+
+## Observability
+
+- Server reads the `traceparent` from the metadata.
+- Client starts a child span and writes the `traceparent` in the metadata.
+
+```go
+server := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
+
+conn, err := grpc.NewClient(addr,
+  grpc.WithTransportCredentials(insecure.NewCredentials()),
+  grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+```
