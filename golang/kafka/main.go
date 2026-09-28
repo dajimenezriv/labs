@@ -4,7 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"kafka/db"
+	"golang/kafka/db"
+	"golang/logger"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -17,8 +18,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -39,13 +38,10 @@ type alert struct {
 }
 
 func main() {
+	logger.Setup()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	slog.SetDefault(slog.New(traceHandler{slog.NewTextHandler(os.Stderr, nil)}))
-
-	otel.SetTracerProvider(sdktrace.NewTracerProvider())
-	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {

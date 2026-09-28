@@ -1,11 +1,22 @@
-package main
+package logger
 
 import (
 	"context"
 	"log/slog"
+	"os"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
+
+func Setup() {
+	slog.SetDefault(slog.New(traceHandler{slog.NewTextHandler(os.Stderr, nil)}))
+
+	otel.SetTracerProvider(sdktrace.NewTracerProvider())
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+}
 
 // traceHandler adds trace_id/span_id from the ctx's active span to every record.
 type traceHandler struct{ slog.Handler }

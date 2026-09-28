@@ -2,16 +2,14 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"grpc/proto"
+	"golang/grpc/proto"
+	"golang/logger"
+	"log/slog"
 	"net"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -19,8 +17,7 @@ import (
 const addr = ":8000"
 
 func main() {
-	otel.SetTracerProvider(sdktrace.NewTracerProvider())
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	logger.Setup()
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -51,12 +48,15 @@ func main() {
 	// Add the traceID to the context.
 	ctx, span := otel.Tracer("client").Start(context.Background(), "main")
 	defer span.End()
-	fmt.Println("client trace_id:", span.SpanContext().TraceID())
 
 	// The connection is lazy, until we don't do the first request it doesn't connect.
 	// If the connection fails it will retry with backoff.
 	client := proto.NewAlertsClient(conn)
-	fmt.Println(client.GetAlert(ctx, &proto.GetAlertRequest{Id: 1}))
+	alert, err := client.GetAlert(ctx, &proto.GetAlertRequest{Id: 1})
+	slog.InfoContext(ctx, "client get alert",
+		"alert", alert.Alert,
+		"ok", alert.Ok,
+		"err", err)
 }
 
 type server struct {
@@ -67,7 +67,7 @@ type server struct {
 }
 
 func (s *server) GetAlert(ctx context.Context, in *proto.GetAlertRequest) (*proto.GetAlertResponse, error) {
-	fmt.Println("server trace_id:", trace.SpanContextFromContext(ctx).TraceID())
+	slog.InfoContext(ctx, "server get alert", "id", in.Id)
 	return &proto.GetAlertResponse{
 		Alert: &proto.Alert{Id: in.GetId()},
 		Ok:    true}, nil

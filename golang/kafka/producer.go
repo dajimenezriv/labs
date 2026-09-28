@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"kafka/db"
+	"golang/kafka/db"
 	"log/slog"
 	"time"
 
