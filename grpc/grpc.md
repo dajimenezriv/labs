@@ -4,7 +4,6 @@
 - [What is protobuf?](#what-is-protobuf)
 - [How to update protobuf schema?](#how-to-update-protobuf-schema)
 - [How are errors handled?](#how-are-errors-handled)
-- [Which side do you deploy first?](#which-side-do-you-deploy-first)
 
 ## What is gRPC (Remote Procedure Call)?
 
@@ -58,7 +57,3 @@ message Data {
 - Tolerance is the design goal. There are no errors.
 - A field the reader doesn't know, or a reused number with a different wire type, reads as the zero value.
 - Zero value: `0`, `""`, the enum's first value.
-
-## Which side do you deploy first?
-
-The reader of the change. Request changes: server first. Response changes: clients first, which for mobile means keeping the old field populated until the oldest supported version is gone.
