@@ -25,4 +25,10 @@ echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
 ```bash
 docker build -t hello:dev .
 docker save hello:dev | sudo k3s ctr images import -
+
+kube apply -f app.yaml -f proxy.yaml
+kube get pods -w
+
+kube port-forward svc/proxy 8000:80
+for i in $(seq 6); do curl -s localhost:8080; done
 ```
