@@ -7,9 +7,9 @@ services:
       - "run"
       - "--server.http.listen-addr=0.0.0.0:12345"
       - "/etc/alloy/config.alloy"
+    env_file: .env
+    ports:
+      - "4318:4318"   # OTLP/HTTP from the app running on the host
+      - "12345:12345" # Alloy UI
     volumes:
-      - ./observability/config/alloy.alloy:/etc/alloy/config.alloy:ro
-      # Read access to the daemon so it can discover containers and read their logs.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      - loki
+      - ./alloy.alloy:/etc/alloy/config.alloy:ro

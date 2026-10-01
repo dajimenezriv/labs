@@ -1,15 +1,32 @@
-prometheus.scrape "app" {
-  targets         = [{"__address__" = "localhost:8000"}]
-  scrape_interval = "15s"
-  forward_to      = [prometheus.remote_write.cloud.receiver]
+otelcol.receiver.otlp "default" {
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
 }
 
-prometheus.remote_write "cloud" {
-  endpoint {
-    url = "https://otlp-gateway-prod-eu-central-0.grafana.net/otlp"
-    basic_auth {
-      username = "dajimenezriv"
-      password = sys.env("OTEL_GRAFANA_CLOUD_TOKEN")
-    }
+otelcol.processor.batch "default" {
+  output {
+    metrics = [otelcol.exporter.otlphttp.cloud.input]
+    logs    = [otelcol.exporter.otlphttp.cloud.input]
+    traces  = [otelcol.exporter.otlphttp.cloud.input]
+  }
+}
+
+otelcol.auth.basic "cloud" {
+  username = sys.env("GRAFANA_CLOUD_INSTANCE_ID")
+  password = sys.env("GRAFANA_CLOUD_TOKEN")
+}
+
+otelcol.exporter.otlphttp "cloud" {
+  client {
+    // The exporter appends /v1/traces, /v1/metrics and /v1/logs.
+    endpoint = "https://otlp-gateway-prod-eu-central-0.grafana.net/otlp"
+    auth     = otelcol.auth.basic.cloud.handler
   }
 }
