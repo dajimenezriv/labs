@@ -3,6 +3,7 @@
 - [Introduction](#introduction)
   - [IdP (Identity Provider)](#idp-identity-provider)
 - [Passwords](#passwords)
+  - [Validation](#validation)
 - [JWT (JSON Web Token)](#jwt-json-web-token)
   - [HMAC (Hash-based Message Authentication Code)](#hmac-hash-based-message-authentication-code)
   - [Asymmetric](#asymmetric)
@@ -129,12 +130,26 @@ func Authenticate(r *http.Request, scopes []string) *Claims {
 
 Argon2id is the current recommendation from OWASP, RFC 9016. Basically the hashing is when the database is stolen they need to spend a lot of resources on brute force the hash.
 
-| Algorithm | Year | Resists GPU | Resists ASIC/FPGA | Notes |
-|---|---|---|---|---|
-| Argon2id | 2015 | Yes | Yes (memory-hard) | Hybrid of Argon2i/d — side-channel + GPU resistance |
-| scrypt | 2009 | Yes | Yes (memory-hard) | Good, but tuning is fiddlier; less analyzed than Argon2 |
-| bcrypt | 1999 | Partially | No | 72-byte input limit, 4 KB fixed memory |
-| PBKDF2 | 2000 | No | No | CPU-only, trivially parallelized on GPUs |
+| Algorithm | Year | Resists GPU | Resists ASIC/FPGA | Notes                                                   |
+| --------- | ---- | ----------- | ----------------- | ------------------------------------------------------- |
+| Argon2id  | 2015 | Yes         | Yes (memory-hard) | Hybrid of Argon2i/d — side-channel + GPU resistance     |
+| scrypt    | 2009 | Yes         | Yes (memory-hard) | Good, but tuning is fiddlier; less analyzed than Argon2 |
+| bcrypt    | 1999 | Partially   | No                | 72-byte input limit, 4 KB fixed memory                  |
+| PBKDF2    | 2000 | No          | No                | CPU-only, trivially parallelized on GPUs                |
+
+### Validation
+
+When logging in, if the username doesn't exist, still verify the submitted password against a dummy hash. This makes the request take about as long as it does for an existing user and prevents username enumeration through timing. Return the same error in both cases.
+
+```go
+var dummyHashForTimingParity = func() string {
+	hash, err := hashPassword("timing-parity-placeholder")
+	if err != nil {
+		panic("hashing timing-parity placeholder: " + err.Error())
+	}
+	return hash
+}()
+```
 
 ## JWT (JSON Web Token)
 
@@ -257,15 +272,15 @@ func (s *Server) logout(ctx context.Context, in *LogoutInput) *LogoutOutput {
 
 ## JWT vs Session
 
-| | Session | Stateless JWT |
-|-|-|-|
-| **Where state lives** | Server (DB/cache) | Inside the token |
-| **Cost per request** | Lookup | Signature verification (CPU only) |
-| **Revocation** | Instant — delete the row | Not possible until `exp`, unless you keep a `jti` deny-list (which reintroduces the lookup you were avoiding) |
-| **Claim freshness** | Always current | Stale until `exp`. Role removed at 14:00 is still valid at 14:10 |
-| **Size on the wire** | ~32 bytes | 500B–2KB, on every request |
-| **Cross-domain / mobile / M2M** | Awkward (cookies are origin-bound) | Natural |
-| **Main attack surface** | CSRF (cookie is sent automatically) | XSS if stored in JS-reachable storage |
+|                                 | Session                             | Stateless JWT                                                                                                 |
+| ------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Where state lives**           | Server (DB/cache)                   | Inside the token                                                                                              |
+| **Cost per request**            | Lookup                              | Signature verification (CPU only)                                                                             |
+| **Revocation**                  | Instant — delete the row            | Not possible until `exp`, unless you keep a `jti` deny-list (which reintroduces the lookup you were avoiding) |
+| **Claim freshness**             | Always current                      | Stale until `exp`. Role removed at 14:00 is still valid at 14:10                                              |
+| **Size on the wire**            | ~32 bytes                           | 500B–2KB, on every request                                                                                    |
+| **Cross-domain / mobile / M2M** | Awkward (cookies are origin-bound)  | Natural                                                                                                       |
+| **Main attack surface**         | CSRF (cookie is sent automatically) | XSS if stored in JS-reachable storage                                                                         |
 
 Technically sessions are safer because the server can instantly revoke or modify session data. However, if a session is stolen it last longer. We can rotate them, but then we introduce issues of race condition on rotation like the JWTs have. Usually we can check if a session is used by checking that the IP/User-Agent is always the same.
 
@@ -337,11 +352,11 @@ Authorization: Basic base64(client_id:client_secret)
 grant_type=client_credentials&scope=invoices:read invoices:write
 ```
 
-| user token | client token |
-| --- | --- |
-| sub = user id | sub = client id |
+| user token                              | client token                |
+| --------------------------------------- | --------------------------- |
+| sub = user id                           | sub = client id             |
 | roles/permissions derived from the user | scope granted to the client |
-| refresh token issued | no refresh token |
+| refresh token issued                    | no refresh token            |
 
 - We need to cache the token until shortly before `exp`. In go we can use `golang.org/x/oauth2/clientcredentials` does the fetch-and-cache transparently.
 - The problem is the shared secret. There are alternatives like `private_key_jwt` or `mTLS` because the secret never travels. Outside the scope.
