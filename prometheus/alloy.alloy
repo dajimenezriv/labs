@@ -1,0 +1,15 @@
+prometheus.scrape "app" {
+  targets         = [{"__address__" = "localhost:8000"}]
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
+prometheus.remote_write "cloud" {
+  endpoint {
+    url = "https://otlp-gateway-prod-eu-central-0.grafana.net/otlp"
+    basic_auth {
+      username = "dajimenezriv"
+      password = sys.env("OTEL_GRAFANA_CLOUD_TOKEN")
+    }
+  }
+}

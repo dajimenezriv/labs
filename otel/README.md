@@ -16,6 +16,9 @@ What does an SRE? Looks at dashboards? Drilldown? Alerts?
 What we do if we don't have a sample because we are not capturing all?
 How are spans and so stored in tempo?
 
+- We can decide if we scrape the data in the SDK at the beginning or in the Collector at the end.
+- If we decide at the Collector at the end then we need to send all traces to the Collector and it stores them in memory.
+
 Reasons to keep `request_id` and `trace_id`:
 
 - **Sampling**: at 1% sampling, a `trace_id` in a log line usually resolves to nothing. Then what's the point of the trace_id??? The question is, all error samples are captured, however how do we know to capture or not to capture? Cost of traces.

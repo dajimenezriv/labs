@@ -1,0 +1,15 @@
+name: prometheus
+
+services:
+  alloy:
+    image: grafana/alloy:v1.12.1
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "/etc/alloy/config.alloy"
+    volumes:
+      - ./observability/config/alloy.alloy:/etc/alloy/config.alloy:ro
+      # Read access to the daemon so it can discover containers and read their logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
