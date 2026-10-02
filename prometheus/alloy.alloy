@@ -10,6 +10,29 @@ otelcol.receiver.otlp "default" {
   }
 }
 
+// Postgres can't push OTLP, so Alloy connects as a client and exposes Prometheus metrics.
+prometheus.exporter.postgres "db" {
+  data_source_names  = [sys.env("POSTGRES_EXPORTER_DSN")]
+  // Replaces the default set instead of adding to it, so the defaults are listed again.
+  enabled_collectors = [
+    "database", "locks", "replication", "replication_slot", "roles", "stat_bgwriter",
+    "stat_database", "stat_progress_vacuum", "stat_user_tables", "statio_user_tables", "wal",
+    "stat_statements",
+  ]
+}
+
+prometheus.scrape "db" {
+  targets    = prometheus.exporter.postgres.db.targets
+  forward_to = [otelcol.receiver.prometheus.default.receiver]
+}
+
+// Converts the scraped samples to OTLP so they reuse the same gateway and credentials.
+otelcol.receiver.prometheus "default" {
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+  }
+}
+
 otelcol.processor.batch "default" {
   output {
     metrics = [otelcol.exporter.otlphttp.cloud.input]

@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -14,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -22,10 +25,18 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// setupOTel wires traces, metrics and logs to push OTLP/HTTP to the local Alloy (localhost:4318).
-// Alloy holds the Grafana Cloud credentials; the app holds none.
 func setupOTel(ctx context.Context) (func(context.Context) error, error) {
-	res, err := resource.New(ctx, resource.WithAttributes(semconv.ServiceName("users")))
+	// One id per replica. Without it, every replica writes the same metric series and their
+	// cumulative counters overwrite each other. The hostname is the machine name here and the
+	// replica name in Container Apps.
+	host, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	res, err := resource.New(ctx, resource.WithAttributes(
+		semconv.ServiceName("users"),
+		semconv.ServiceInstanceID(host),
+	))
 	if err != nil {
 		return nil, err
 	}
@@ -36,6 +47,8 @@ func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 	}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(traceExp), sdktrace.WithResource(res))
 	otel.SetTracerProvider(tp)
+	// Without a propagator, every service starts a new trace instead of continuing the caller's.
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	metricExp, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithInsecure())
 	if err != nil {
@@ -49,15 +62,45 @@ func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 		return nil, err
 	}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)), sdklog.WithResource(res))
-	global.SetLoggerProvider(lp)
+	otel.SetLoggerProvider(lp)
 
 	return func(ctx context.Context) error {
 		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx), lp.Shutdown(ctx))
 	}, nil
 }
 
+func monitor(ctx context.Context) {
+	interval := time.Second
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	var m runtime.MemStats
+	var prev, ru syscall.Rusage
+	syscall.Getrusage(syscall.RUSAGE_SELF, &prev)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runtime.ReadMemStats(&m)
+			syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+
+			used := (ru.Utime.Nano() + ru.Stime.Nano()) - (prev.Utime.Nano() + prev.Stime.Nano())
+			prev = ru
+
+			fmt.Printf("heap=%dMiB sys=%dMiB gc=%d goroutines=%d cpu=%.0fm\n",
+				m.HeapAlloc>>20,
+				m.Sys>>20,
+				m.NumGC,
+				runtime.NumGoroutine(),
+				float64(used)/float64(interval)*1000)
+		}
+	}
+}
+
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	shutdown, err := setupOTel(ctx)
@@ -66,6 +109,8 @@ func main() {
 	}
 	// Flushes the batched spans, logs and the last metric reading before exit.
 	defer shutdown(context.Background())
+
+	go monitor(ctx)
 
 	logger := otelslog.NewLogger("users")
 

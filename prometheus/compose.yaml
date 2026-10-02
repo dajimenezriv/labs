@@ -8,8 +8,20 @@ services:
       - "--server.http.listen-addr=0.0.0.0:12345"
       - "/etc/alloy/config.alloy"
     env_file: .env
+    environment:
+      POSTGRES_EXPORTER_DSN: "postgresql://monitoring:monitoring@postgres:5432/postgres?sslmode=disable"
     ports:
-      - "4318:4318"   # OTLP/HTTP from the app running on the host
+      - "4318:4318" # OTLP/HTTP from the app running on the host
       - "12345:12345" # Alloy UI
     volumes:
       - ./alloy.alloy:/etc/alloy/config.alloy:ro
+    # depends_on:
+    #   - postgres
+
+  # postgres:
+  #   image: postgres:18
+  #   command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+  #   environment:
+  #     POSTGRES_PASSWORD: postgres
+  #   volumes:
+  #     - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
