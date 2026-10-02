@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
+	otelprom "go.opentelemetry.io/contrib/bridges/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -54,7 +55,10 @@ func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 	if err != nil {
 		return nil, err
 	}
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp)), sdkmetric.WithResource(res))
+	// The bridge reads client_golang's default registry (go_* and process_* collectors) on every
+	// export and sends it over OTLP with the rest, so the runtime metrics keep their Prometheus names.
+	reader := sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithProducer(otelprom.NewMetricProducer()))
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithResource(res))
 	otel.SetMeterProvider(mp)
 
 	logExp, err := otlploghttp.New(ctx, otlploghttp.WithInsecure())
