@@ -22,4 +22,4 @@ By doing `extra_hosts: host.docker.internal:host-gateway` we make:
 hostIP host.docker.internal
 ```
 
-We could do `docker run --rm --add-host host.docker.internal:host-gateway --add-host my-laptop:host-gateway alpine cat /etc/hosts` to add also the name `my-laptop`. With this command we are creaating an alpine container that we are going to remove as soon as the process exists and we add both hosts.
+We could do `docker run --rm --add-host host.docker.internal:host-gateway --add-host my-laptop:host-gateway alpine cat /etc/hosts` to add also the name `my-laptop`. With this command we are creating an alpine container that we are going to remove as soon as the process exists and we add both hosts.
