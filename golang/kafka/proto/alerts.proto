@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+option go_package = "golang/kafka/proto;alertspb";
+
+package alerts;
+
+message Alert {
+  string sensor_id = 1;
+  double value = 2;
+}

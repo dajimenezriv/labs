@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	alertspb "golang/kafka/proto"
 	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
+	"google.golang.org/protobuf/proto"
 )
 
 func runConsumer(ctx context.Context, client *kgo.Client) {
@@ -36,7 +38,15 @@ func runConsumer(ctx context.Context, client *kgo.Client) {
 
 			traceContext := extractTraceContext(ctx, headers)
 			spanCtx, span := otel.Tracer(serviceName).Start(traceContext, "consume "+topic)
-			slog.InfoContext(spanCtx, "consume event", "payload", string(r.Value))
+			var alert alertspb.Alert
+			if err := proto.Unmarshal(r.Value, &alert); err != nil {
+				// A payload that cannot be decoded will not decode on a retry either.
+				slog.ErrorContext(spanCtx, "unmarshal alert", "err", err)
+			} else {
+				slog.InfoContext(spanCtx, "consume event",
+					"sensor_id", alert.GetSensorId(),
+					"value", alert.GetValue())
+			}
 			span.End()
 
 			handled = append(handled, r)

@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"golang/kafka/db"
+	alertspb "golang/kafka/proto"
 	"golang/logger"
 	"log/slog"
 	"os"
@@ -18,6 +18,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -31,11 +32,6 @@ const (
 	partitions        = 3
 	replicationFactor = -1
 )
-
-type alert struct {
-	SensorID string  `json:"sensor_id"`
-	Value    float64 `json:"value"`
-}
 
 func main() {
 	logger.Setup()
@@ -65,7 +61,7 @@ func main() {
 		panic("create topic: " + err.Error())
 	}
 
-	payload, err := json.Marshal(alert{SensorID: "sensorID", Value: 10.2})
+	payload, err := proto.Marshal(&alertspb.Alert{SensorId: "sensorID", Value: 10.2})
 	if err != nil {
 		panic("marshal: " + err.Error())
 	}
