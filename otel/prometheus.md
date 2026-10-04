@@ -1,7 +1,6 @@
 # Prometheus
 
 - Collects and stores real-time numerical performance data.
-- It scraps an HTTP /metrics endpoint at a fixed interval (usually 15s). Targets must be discoverable (static config, DNS, Docker).
 
 ## Metrics
 

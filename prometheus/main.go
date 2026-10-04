@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
+
+// absent metric
 
 func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 	// One id per replica. Without it, every replica writes the same metric series and their
@@ -57,7 +60,7 @@ func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 	}
 	// The bridge reads client_golang's default registry (go_* and process_* collectors) on every
 	// export and sends it over OTLP with the rest, so the runtime metrics keep their Prometheus names.
-	reader := sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithProducer(otelprom.NewMetricProducer()))
+	reader := sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithInterval(15*time.Second), sdkmetric.WithProducer(otelprom.NewMetricProducer()))
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithResource(res))
 	otel.SetMeterProvider(mp)
 
@@ -121,6 +124,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Millisecond)
+		if rand.Float64() < 0.02 {
+			logger.ErrorContext(r.Context(), "user fetch failed", "id", r.PathValue("id"))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		logger.InfoContext(r.Context(), "user fetched", "id", r.PathValue("id"))
 	})
 
