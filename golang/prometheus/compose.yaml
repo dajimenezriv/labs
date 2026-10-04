@@ -12,8 +12,19 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./rules.yml:/etc/prometheus/rules.yml:ro
 
-  alertmanager:
-    image: prom/alertmanager:v0.31.0
+  grafana:
+    image: grafana/grafana:13.2.3
     attach: false
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
     volumes:
-      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./grafana.yml:/etc/grafana/provisioning/datasources/grafana.yml:ro
+
+  # alertmanager:
+  #   image: prom/alertmanager:v0.31.0
+  #   attach: false
+  #   volumes:
+  #     - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
