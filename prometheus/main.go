@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -130,6 +132,36 @@ func main() {
 			return
 		}
 		logger.InfoContext(r.Context(), "user fetched", "id", r.PathValue("id"))
+	})
+
+	// Goroutine leak: the channel is unbuffered, so when the timeout wins nobody ever receives
+	// and the fetcher blocks on the send forever. Fix: make(chan string, 1).
+	mux.HandleFunc("GET /users/{id}/profile", func(w http.ResponseWriter, r *http.Request) {
+		ch := make(chan string)
+		go func() {
+			time.Sleep(time.Duration(50+rand.IntN(100)) * time.Millisecond) // slow upstream
+			ch <- "profile of " + r.PathValue("id")
+		}()
+		select {
+		case p := <-ch:
+			fmt.Fprintln(w, p)
+		case <-time.After(100 * time.Millisecond):
+			http.Error(w, "upstream timeout", http.StatusGatewayTimeout)
+		}
+	})
+
+	// Memory leak: every rendered response is kept "for debugging" and nothing ever trims it.
+	// Fix: a bounded ring buffer, or don't keep it at all.
+	var (
+		mu     sync.Mutex
+		recent [][]byte
+	)
+	mux.HandleFunc("GET /users/{id}/report", func(w http.ResponseWriter, r *http.Request) {
+		body := bytes.Repeat([]byte(r.PathValue("id")), 32<<10)
+		mu.Lock()
+		recent = append(recent, body)
+		mu.Unlock()
+		w.Write(body)
 	})
 
 	// otelhttp creates the server span and records http.server.request.duration.
