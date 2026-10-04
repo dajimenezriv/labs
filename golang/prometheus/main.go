@@ -20,8 +20,6 @@ type notification struct {
 }
 
 func main() {
-	fmt.Println(counter())
-
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -51,9 +49,11 @@ func counter() string {
 	metrics.WriteString("# TYPE my_counter counter\n")
 	values := []int{1, 2, 3, 4, 5, 5, 5, 5, 5, 9, 10, 11}
 
+	ts := time.Now().Add(-time.Hour)
 	for _, v := range values {
 		for range 4 {
-			fmt.Fprintf(&metrics, "my_counter %d 1791122146903\n", v*18000)
+			fmt.Fprintf(&metrics, "my_counter %d %d\n", v*18000, ts.UnixMilli())
+			ts = ts.Add(15 * time.Second)
 		}
 	}
 
